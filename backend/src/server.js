@@ -7,6 +7,9 @@ const submissionRoutes = require('./routes/submissions.routes');
 const problemRoutes = require('./routes/problems.routes');
 const db = require('./config/db');
 
+// Initialize Worker
+require('./workers/judge.worker');
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
