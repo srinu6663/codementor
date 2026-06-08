@@ -16,8 +16,6 @@
 #     -d '{"source_code":"print(\"Hello, World!\")","language_id":71}'
 # ============================================================
 
-version: "3.9"
-
 services:
   # ── Judge0 Server ─────────────────────────────────────────
   server:
