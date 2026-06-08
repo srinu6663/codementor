@@ -4,6 +4,8 @@ const morgan = require('morgan');
 require('dotenv').config();
 
 const submissionRoutes = require('./routes/submissions.routes');
+const problemRoutes = require('./routes/problems.routes');
+const db = require('./config/db');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -15,6 +17,7 @@ app.use(morgan('dev')); // Logger
 
 // Routes
 app.use('/api', submissionRoutes);
+app.use('/api/problems', problemRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -22,6 +25,8 @@ app.get('/health', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Backend server running on http://localhost:${PORT}`);
+  // Initialize Database tables
+  await db.scaffoldDatabase();
 });

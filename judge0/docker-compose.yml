@@ -72,6 +72,8 @@ services:
   db:
     image: postgres:13-alpine
     container_name: judge0_db
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
