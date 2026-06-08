@@ -22,6 +22,7 @@ app.use(morgan('dev')); // Logger
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/student', require('./routes/student.routes'));
+app.use('/api/faculty', require('./routes/faculty.routes'));
 app.use('/api', submissionRoutes);
 app.use('/api/problems', problemRoutes);
 

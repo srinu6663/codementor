@@ -64,6 +64,26 @@ const scaffoldDatabase = async () => {
       );
     `);
 
+    // Scaffold Assignments Table
+    await query(`
+      CREATE TABLE IF NOT EXISTS assignments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        faculty_id UUID REFERENCES users(id),
+        title VARCHAR(200) NOT NULL,
+        deadline TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    // Scaffold Assignment Problems Table
+    await query(`
+      CREATE TABLE IF NOT EXISTS assignment_problems (
+        assignment_id UUID REFERENCES assignments(id) ON DELETE CASCADE,
+        problem_id UUID REFERENCES problems(id) ON DELETE CASCADE,
+        PRIMARY KEY (assignment_id, problem_id)
+      );
+    `);
+
     console.log('✅ Database tables initialized successfully.');
   } catch (error) {
     console.error('❌ Failed to initialize database tables:', error);
