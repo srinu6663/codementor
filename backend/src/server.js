@@ -3,6 +3,7 @@ const cors = require('cors');
 const morgan = require('morgan');
 require('dotenv').config();
 
+const authRoutes = require('./routes/auth.routes');
 const submissionRoutes = require('./routes/submissions.routes');
 const problemRoutes = require('./routes/problems.routes');
 const db = require('./config/db');
@@ -19,6 +20,7 @@ app.use(express.json());
 app.use(morgan('dev')); // Logger
 
 // Routes
+app.use('/api/auth', authRoutes);
 app.use('/api', submissionRoutes);
 app.use('/api/problems', problemRoutes);
 

@@ -17,6 +17,8 @@ const scaffoldDatabase = async () => {
         email VARCHAR(100) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
         role VARCHAR(20) DEFAULT 'student',
+        failed_login_attempts INTEGER DEFAULT 0,
+        locked_until TIMESTAMP DEFAULT NULL,
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
