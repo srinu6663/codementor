@@ -64,11 +64,14 @@ export default function EditorPage() {
     setJobProgress(0);
 
     try {
+      const token = localStorage.getItem('accessToken');
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
       const response = await axios.post('/api/submit', {
         source_code: code,
         language_id: selectedLang.id,
         problem_id: id
-      });
+      }, { headers });
 
       if (response.data.success) {
         pollJobStatus(response.data.jobId);

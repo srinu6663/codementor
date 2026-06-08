@@ -1,29 +1,48 @@
 const express = require('express');
+const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
 const { submissionsQueue } = require('../config/queue');
+const jwt = require('jsonwebtoken');
 
 const router = express.Router();
 
 // POST /api/submit -> Add submission to Queue
 router.post('/submit', async (req, res) => {
-  const { source_code, language_id, problem_id, user_id } = req.body;
-
-  if (!source_code || !language_id || !problem_id) {
-    return res.status(400).json({ success: false, error: 'source_code, language_id, and problem_id are required' });
-  }
-
   try {
+    const { source_code, language_id, problem_id } = req.body;
+
+    if (!source_code || !language_id || !problem_id) {
+      return res.status(400).json({ success: false, error: 'source_code, language_id, and problem_id are required' });
+    }
+
+    let user_id = null;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      try {
+        const token = req.headers.authorization.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        user_id = decoded.id;
+      } catch (err) {
+        console.error("Token verification failed in submit", err);
+      }
+    }
+
+    // Generate unique job ID
+    const jobId = uuidv4();
+
     // Add to BullMQ Queue
-    const job = await submissionsQueue.add('judge-submission', {
+    await submissionsQueue.add('judge-submission', {
+      jobId,
       source_code,
       language_id,
       problem_id,
-      user_id: user_id || null
+      user_id
+    }, {
+      jobId
     });
 
     return res.json({
       success: true,
-      jobId: job.id,
+      jobId: jobId,
       message: 'Submission queued successfully'
     });
   } catch (error) {
