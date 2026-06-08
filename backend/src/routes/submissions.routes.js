@@ -78,7 +78,7 @@ router.get('/submissions', async (req, res) => {
   try {
     const { rows } = await db.query(`
       SELECT s.id, s.verdict, s.language, s.runtime, s.memory, s.submitted_at, p.title as problem_title 
-      FROM submissions s
+      FROM code_submissions s
       JOIN problems p ON s.problem_id = p.id
       ORDER BY s.submitted_at DESC
       LIMIT 50

@@ -245,7 +245,7 @@ const seedDB = async () => {
     
     // Clear old data
     await pool.query('DELETE FROM test_cases');
-    await pool.query('DELETE FROM submissions');
+    await pool.query('DELETE FROM code_submissions');
     await pool.query('DELETE FROM problems');
 
     for (const problem of ALL_PROBLEMS) {

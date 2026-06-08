@@ -49,7 +49,7 @@ const scaffoldDatabase = async () => {
 
     // Scaffold Submissions Table
     await query(`
-      CREATE TABLE IF NOT EXISTS submissions (
+      CREATE TABLE IF NOT EXISTS code_submissions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID REFERENCES users(id),
         problem_id UUID REFERENCES problems(id),

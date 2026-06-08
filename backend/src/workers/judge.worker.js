@@ -5,15 +5,14 @@ const { connection } = require('../config/queue');
 
 const JUDGE0_URL = process.env.JUDGE0_URL || 'http://localhost:2358';
 
-const runTestCase = async (source_code, language_id, stdin, expected_output) => {
-  // Submit code to Judge0
+const runTestCase = async (source_code, language_id, stdin) => {
+  // Submit code to Judge0 without expected_output so we can do custom robust comparison
   const submissionResponse = await axios.post(
     `${JUDGE0_URL}/submissions?base64_encoded=false&wait=true`,
     {
       source_code,
       language_id,
-      stdin,
-      expected_output
+      stdin
     },
     { headers: { 'Content-Type': 'application/json' } }
   );
@@ -28,6 +27,12 @@ const runTestCase = async (source_code, language_id, stdin, expected_output) => 
     compile_output: result.compile_output,
     message: result.message
   };
+};
+
+const normalizeOutput = (str) => {
+  if (!str) return '';
+  // Remove brackets, commas, quotes, and normalize whitespace
+  return str.replace(/\[|\]|\{|\}|"|'|,/g, ' ').trim().split(/\s+/).join(' ');
 };
 
 const judgeWorker = new Worker('submissions', async job => {
@@ -57,17 +62,27 @@ const judgeWorker = new Worker('submissions', async job => {
     // Update job progress
     await job.updateProgress(Math.floor((i / testCases.length) * 100));
 
-    const result = await runTestCase(source_code, language_id, tc.input_data, tc.expected_output);
+    const result = await runTestCase(source_code, language_id, tc.input_data);
+    
+    // Custom Robust Output Comparison
+    if (result.status.id === 3) {
+      const userOutput = normalizeOutput(result.stdout);
+      const expectedOut = normalizeOutput(tc.expected_output);
+      
+      if (userOutput !== expectedOut) {
+        result.status = { id: 4, description: 'Wrong Answer' };
+        result.message = `Expected: ${tc.expected_output}\nGot: ${result.stdout}`;
+      }
+    }
+
     results.push(result);
 
     const time = parseFloat(result.time) || 0;
     if (time > maxTime) maxTime = time;
     if (result.memory > maxMemory) maxMemory = result.memory;
 
-    // If a test case fails, we stop (or continue to collect all failures, but typically competitive programming stops or records the first failure as the verdict)
-    if (result.status.id !== 3) { // 3 is Accepted in Judge0
+    if (result.status.id !== 3) { 
       finalVerdict = result.status;
-      // We can break early on WA/TLE to save resources
       break;
     }
   }
@@ -77,7 +92,7 @@ const judgeWorker = new Worker('submissions', async job => {
 
   // Insert submission record into database
   const insertResult = await db.query(
-    `INSERT INTO submissions (user_id, problem_id, code, language, verdict, runtime, memory)
+    `INSERT INTO code_submissions (user_id, problem_id, code, language, verdict, runtime, memory)
      VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
     [
       user_id || null, 
