@@ -1,0 +1,112 @@
+# ============================================================
+# Judge0 CE — Self-hosted Code Execution Engine
+# https://github.com/judge0/judge0
+# ============================================================
+#
+# Usage:
+#   docker compose up -d
+#
+# Judge0 API will be available at: http://localhost:2358
+# API Docs:  http://localhost:2358/docs
+# Dashboard: http://localhost:2358 (Swagger UI)
+#
+# To test:
+#   curl -X POST http://localhost:2358/submissions \
+#     -H "Content-Type: application/json" \
+#     -d '{"source_code":"print(\"Hello, World!\")","language_id":71}'
+# ============================================================
+
+version: "3.9"
+
+services:
+  # ── Judge0 Server ─────────────────────────────────────────
+  server:
+    image: judge0/judge0:1.13.1
+    container_name: judge0_server
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+    ports:
+      - "2358:2358"
+    privileged: true
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: judge0_secret
+    networks:
+      - judge0_net
+
+  # ── Judge0 Worker ─────────────────────────────────────────
+  worker:
+    image: judge0/judge0:1.13.1
+    container_name: judge0_worker
+    command: ["./scripts/workers"]
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+    privileged: true
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: judge0_secret
+    networks:
+      - judge0_net
+
+  # ── PostgreSQL (Judge0's database) ────────────────────────
+  db:
+    image: postgres:13-alpine
+    container_name: judge0_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: judge0_secret
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge0 -d judge0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - judge0_net
+
+  # ── Redis (Judge0's job queue) ────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: judge0_redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - judge0_net
+
+volumes:
+  postgres_data:
+    name: judge0_postgres_data
+
+networks:
+  judge0_net:
+    name: judge0_network
+    driver: bridge
