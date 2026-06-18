@@ -15,9 +15,16 @@
 codementor.example.com {
     encode gzip
 
-    # API + realtime → Node backend
-    @api path /api/* /socket.io/*
-    reverse_proxy @api localhost:3001
+    # API + realtime → Node backend.
+    # Use handle blocks (not a bare matcher) so POST/PUT/etc. to /api reliably
+    # reach the backend instead of falling through to the static file server
+    # (which would return 405 Method Not Allowed).
+    handle /api/* {
+        reverse_proxy localhost:3001
+    }
+    handle /socket.io/* {
+        reverse_proxy localhost:3001
+    }
 
     # Everything else → the static React build (SPA fallback to index.html)
     handle {
