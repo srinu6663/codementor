@@ -351,12 +351,13 @@ async function seed() {
       
       const probId = probRes.rows[0].id;
       
-      // Insert Test Cases
-      for (const tc of prob.testCases) {
+      // Insert Test Cases — first 2 are public (shown as examples), the rest hidden.
+      for (let i = 0; i < prob.testCases.length; i++) {
+        const tc = prob.testCases[i];
         await db.query(`
           INSERT INTO test_cases (problem_id, input_data, expected_output, is_public)
-          VALUES ($1, $2, $3, true)
-        `, [probId, tc.input, tc.expected]);
+          VALUES ($1, $2, $3, $4)
+        `, [probId, tc.input, tc.expected, i < 2]);
       }
       
       console.log(`✅ Inserted: ${prob.title}`);
