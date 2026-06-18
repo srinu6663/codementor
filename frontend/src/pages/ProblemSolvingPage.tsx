@@ -129,7 +129,7 @@ export default function ProblemSolvingPage() {
   const currentJobRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const socket = io(import.meta.env.VITE_API_URL || 'http://localhost:3001', {
+    const socket = io(import.meta.env.VITE_API_URL || window.location.origin, {
       transports: ['websocket', 'polling'],
     });
     socketRef.current = socket;

@@ -118,7 +118,7 @@ function ScoreboardPanel({ contestId, problemIds, frozen, hidden }: {
 
   // Live updates: join the contest room and refetch when a new verdict lands.
   useEffect(() => {
-    const socket = io(import.meta.env.VITE_API_URL || 'http://localhost:3001', {
+    const socket = io(import.meta.env.VITE_API_URL || window.location.origin, {
       transports: ['websocket', 'polling'],
     });
     socket.on('connect', () => { socket.emit('join', `contest:${contestId}`); setLive(true); });
