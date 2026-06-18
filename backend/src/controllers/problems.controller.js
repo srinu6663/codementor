@@ -1,13 +1,75 @@
 const db = require('../config/db');
 
-// @desc    Get all problems
+// @desc    Get all problems (with optional filters)
 // @route   GET /api/problems
+const ALLOWED_DIFFICULTIES = new Set(['easy', 'medium', 'hard']);
+
 exports.getProblems = async (req, res) => {
   try {
+    let { difficulty, tag, search, limit } = req.query;
+    const conditions = [];
+    const params = [];
+
+    if (difficulty) {
+      if (!ALLOWED_DIFFICULTIES.has(String(difficulty).toLowerCase())) {
+        return res.status(400).json({ success: false, error: 'Invalid difficulty value.' });
+      }
+      params.push(difficulty);
+      conditions.push(`difficulty = $${params.length}`);
+    }
+    if (tag) {
+      tag = String(tag).slice(0, 50);
+      params.push(tag);
+      conditions.push(`$${params.length} = ANY(tags)`);
+    }
+    if (search) {
+      search = String(search).slice(0, 100);
+      params.push(`%${search}%`);
+      conditions.push(`title ILIKE $${params.length}`);
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const parsedLimit = Math.min(Math.max(parseInt(limit) || 100, 1), 200);
+    const limitClause = `LIMIT ${parsedLimit}`;
+
     const { rows } = await db.query(
-      'SELECT id, title, difficulty, tags, time_limit, memory_limit FROM problems ORDER BY id DESC'
+      `SELECT id, title, difficulty, tags, time_limit, memory_limit, created_at
+       FROM problems ${where}
+       ORDER BY created_at DESC ${limitClause}`,
+      params
     );
     res.json({ success: true, count: rows.length, data: rows });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, error: 'Server Error' });
+  }
+};
+
+// @desc    Get prev/next problem IDs for navigation
+// @route   GET /api/problems/:id/adjacent
+exports.getAdjacentProblems = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get all problem IDs ordered by creation date
+    const { rows } = await db.query(
+      'SELECT id FROM problems ORDER BY created_at ASC'
+    );
+
+    const idx = rows.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: 'Problem not found' });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        prev: idx > 0 ? rows[idx - 1].id : null,
+        next: idx < rows.length - 1 ? rows[idx + 1].id : null,
+        position: idx + 1,
+        total: rows.length
+      }
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ success: false, error: 'Server Error' });
@@ -35,6 +97,18 @@ exports.getProblemById = async (req, res) => {
     );
 
     problem.test_cases = testCasesResult.rows;
+    // The solve page consumes `examples` with {input, output} field names.
+    problem.examples = testCasesResult.rows.map(r => ({
+      input: r.input_data,
+      output: r.expected_output,
+    }));
+
+    // Hide editorial if not yet published
+    const now = new Date();
+    if (!problem.editorial_visible_at || new Date(problem.editorial_visible_at) > now) {
+      problem.editorial = null;
+    }
+    problem.editorial_unlocked = !!problem.editorial;
 
     res.json({ success: true, data: problem });
   } catch (error) {

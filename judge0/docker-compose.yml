@@ -24,7 +24,7 @@ services:
     volumes:
       - ./judge0.conf:/judge0.conf:ro
     ports:
-      - "2358:2358"
+      - "127.0.0.1:2358:2358"
     privileged: true
     restart: unless-stopped
     depends_on:
@@ -72,8 +72,6 @@ services:
   db:
     image: postgres:13-alpine
     container_name: judge0_db
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
@@ -93,8 +91,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: judge0_redis
-    ports:
-      - "6379:6379"
+    # No port exposed — only reachable inside judge0_net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

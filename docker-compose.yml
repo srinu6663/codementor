@@ -1,0 +1,175 @@
+# CodeSphere — Full-Stack Production Compose
+# ─────────────────────────────────────────────────────────────────────────────
+# Network isolation model:
+#
+#   judge0_net  — Judge0 server, worker, its postgres, its redis
+#                 Judge0 has NO exposed ports; only the backend can reach it.
+#
+#   app_net     — Express backend, app postgres, app redis (BullMQ)
+#
+#   The backend sits on BOTH networks so it can talk to Judge0 internally
+#   via http://judge0_server:2358 without ever touching the host interface.
+#
+# Usage:
+#   cp .env.example .env          # fill in secrets
+#   docker compose up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── App: Express backend ───────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: codesphere_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Reaches Judge0 via internal Docker network — no host port needed
+      JUDGE0_URL: http://judge0_server:2358
+      # App database
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@app_db:5432/${POSTGRES_DB}
+      # BullMQ Redis
+      REDIS_URL: redis://app_redis:6379
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      app_db:
+        condition: service_healthy
+      app_redis:
+        condition: service_healthy
+      judge0_server:
+        condition: service_started
+    networks:
+      - app_net
+      - judge0_net
+
+  # ── App: PostgreSQL ────────────────────────────────────────────────────────
+  app_db:
+    image: postgres:16-alpine
+    container_name: codesphere_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-codesphere}
+      POSTGRES_USER: ${POSTGRES_USER:-codesphere}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - app_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-codesphere}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_net
+
+  # ── App: Redis (BullMQ queue) ──────────────────────────────────────────────
+  app_redis:
+    image: redis:7-alpine
+    container_name: codesphere_redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-}
+    volumes:
+      - app_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_net
+
+  # ── Judge0: server ─────────────────────────────────────────────────────────
+  judge0_server:
+    image: judge0/judge0:1.13.1
+    container_name: judge0_server
+    volumes:
+      - ./judge0/judge0.conf:/judge0.conf:ro
+    # NO ports block — not reachable from host, only from backend via judge0_net
+    privileged: true
+    restart: unless-stopped
+    depends_on:
+      judge0_db:
+        condition: service_healthy
+      judge0_redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: judge0_redis
+      REDIS_PORT: 6379
+      POSTGRES_HOST: judge0_db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:-judge0_secret}
+    networks:
+      - judge0_net
+
+  # ── Judge0: worker ─────────────────────────────────────────────────────────
+  judge0_worker:
+    image: judge0/judge0:1.13.1
+    container_name: judge0_worker
+    command: ["./scripts/workers"]
+    volumes:
+      - ./judge0/judge0.conf:/judge0.conf:ro
+    privileged: true
+    restart: unless-stopped
+    depends_on:
+      judge0_db:
+        condition: service_healthy
+      judge0_redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: judge0_redis
+      REDIS_PORT: 6379
+      POSTGRES_HOST: judge0_db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:-judge0_secret}
+    networks:
+      - judge0_net
+
+  # ── Judge0: PostgreSQL ─────────────────────────────────────────────────────
+  judge0_db:
+    image: postgres:13-alpine
+    container_name: judge0_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: judge0
+      POSTGRES_USER: judge0
+      POSTGRES_PASSWORD: ${JUDGE0_DB_PASSWORD:-judge0_secret}
+    volumes:
+      - judge0_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U judge0 -d judge0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - judge0_net
+
+  # ── Judge0: Redis ──────────────────────────────────────────────────────────
+  judge0_redis:
+    image: redis:7-alpine
+    container_name: judge0_redis
+    restart: unless-stopped
+    # No port exposed — only reachable inside judge0_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - judge0_net
+
+volumes:
+  app_postgres_data:
+  app_redis_data:
+  judge0_postgres_data:
+
+networks:
+  app_net:
+    driver: bridge
+  judge0_net:
+    driver: bridge

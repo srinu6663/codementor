@@ -74,3 +74,10 @@ temp/
 # ── Logs ─────────────────────────────────────────────────────
 logs/
 *.log
+
+# ── Local test / scratch artifacts ───────────────────────────
+_smoke*.js
+_cleanup.js
+backend/_cleanup.js
+# Local design reference (not part of the app)
+Problem Solving Page Design After claude/

@@ -1,0 +1,36 @@
+# ── RECOMMENDED: all-in-one on the Droplet ────────────────────────────────────
+# Caddy serves the built React app AND proxies the API + WebSockets to the backend,
+# all under ONE domain with automatic HTTPS. No CORS, no mixed-content, one cert.
+#
+# Setup:
+#   1. Point a DNS A record at the Droplet IP (a cheap domain, or a FREE one via
+#      duckdns.org / no-ip.com works fine for a demo). Replace the domain below.
+#   2. Build the frontend with VITE_API_URL set to this same domain:
+#        cd frontend && VITE_API_URL=https://codementor.example.com \
+#          VITE_GOOGLE_CLIENT_ID=<id> npm run build
+#      then copy frontend/dist to /var/www/codementor on the Droplet.
+#   3. Run the backend stack: docker compose up --build -d   (backend on :3001)
+#   4. Run Caddy (ports 80/443):  caddy run --config ./deploy/Caddyfile
+
+codementor.example.com {
+    encode gzip
+
+    # API + realtime → Node backend
+    @api path /api/* /socket.io/*
+    reverse_proxy @api localhost:3001
+
+    # Everything else → the static React build (SPA fallback to index.html)
+    handle {
+        root * /var/www/codementor
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# ── ALTERNATIVE: split (frontend on Vercel) ────────────────────────────────────
+# If you prefer Vercel for the frontend, use this instead and set CORS_ORIGIN +
+# Google authorized origins to the Vercel URL (see docs/DEPLOYMENT.md):
+#
+# api.codementor.example.com {
+#     reverse_proxy localhost:3001
+# }

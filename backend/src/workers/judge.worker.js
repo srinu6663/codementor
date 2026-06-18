@@ -2,47 +2,200 @@ const { Worker } = require('bullmq');
 const axios = require('axios');
 const db = require('../config/db');
 const { connection } = require('../config/queue');
+const { getIO } = require('../config/io');
+const { runChecker } = require('../utils/checkerRunner');
 
 const JUDGE0_URL = process.env.JUDGE0_URL || 'http://localhost:2358';
+const BATCH_SIZE  = parseInt(process.env.JUDGE0_BATCH_SIZE || '20', 10);
+const POLL_INTERVAL_MS = 500;
+const POLL_MAX_ATTEMPTS = 60; // 30 s
 
-const runTestCase = async (source_code, language_id, stdin) => {
-  // Submit code to Judge0 without expected_output so we can do custom robust comparison
-  const submissionResponse = await axios.post(
-    `${JUDGE0_URL}/submissions?base64_encoded=false&wait=true`,
-    {
-      source_code,
-      language_id,
-      stdin
-    },
-    { headers: { 'Content-Type': 'application/json' } }
-  );
-
-  const result = submissionResponse.data;
+// Auth header sent on every Judge0 request — matches AUTHN_TOKEN in judge0.conf
+const judge0Headers = () => {
+  const token = process.env.JUDGE0_AUTH_TOKEN;
   return {
-    status: result.status,
-    time: result.time,
-    memory: result.memory,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    compile_output: result.compile_output,
-    message: result.message
+    'Content-Type': 'application/json',
+    ...(token ? { 'X-Auth-Token': token } : {}),
   };
 };
 
-const normalizeOutput = (str) => {
-  if (!str) return '';
-  // Remove brackets, commas, quotes, and normalize whitespace
-  return str.replace(/\[|\]|\{|\}|"|'|,/g, ' ').trim().split(/\s+/).join(' ');
+// Per-language multipliers — slower runtimes get proportionally more time/memory.
+// Keys are Judge0 language IDs.
+// C/C++ = 1×, Java = 2×, Python/JS/TypeScript = 3×, others default to 2×
+const LANG_MULTIPLIERS = {
+  50: 1, // C (GCC 9.2)
+  51: 1, // C++ (GCC 7.4)
+  52: 1, // C++ (GCC 8.3)
+  54: 1, // C++ (GCC 9.2)
+  76: 1, // C++ (GCC 14.1)
+  62: 2, // Java (OpenJDK 13)
+  63: 3, // JavaScript (Node 12)
+  71: 3, // Python 3 (3.8)
+  72: 3, // Python 3 (3.11)
+  73: 3, // TypeScript (3.7)
+  74: 2, // TypeScript (5.0)
+  75: 2, // Go (1.18)
 };
 
-const judgeWorker = new Worker('submissions', async job => {
-  const { problem_id, source_code, language_id, user_id } = job.data;
-  
-  console.log(`Processing Job ${job.id} for Problem ${problem_id}`);
+const getLangMultiplier = (language_id) =>
+  LANG_MULTIPLIERS[Number(language_id)] ?? 2;
 
-  // Fetch test cases
+// Single run — used only for custom-input jobs
+const runSingle = async (source_code, language_id, stdin) => {
+  const m = getLangMultiplier(language_id);
+  try {
+    const res = await axios.post(
+      `${JUDGE0_URL}/submissions?base64_encoded=false&wait=true`,
+      { source_code, language_id, stdin, cpu_time_limit: 2 * m, wall_time_limit: 5 * m, memory_limit: 262144 * m },
+      { headers: judge0Headers(), timeout: 15000 }
+    );
+    const r = res.data;
+    return sanitizeResult({ status: r.status, time: r.time, memory: r.memory, stdout: r.stdout, stderr: r.stderr, compile_output: r.compile_output, message: r.message });
+  } catch (err) {
+    if (err.response?.status === 503) throw new QueueFullError();
+    throw err;
+  }
+};
+
+// Tagged error so the worker can detect queue-full vs other failures
+class QueueFullError extends Error {
+  constructor() { super('Judge0 queue is full'); this.name = 'QueueFullError'; }
+}
+
+// Submit a chunk of test cases in one HTTP call; returns array of token strings
+const submitBatch = async (submissions) => {
+  try {
+    const res = await axios.post(
+      `${JUDGE0_URL}/submissions/batch?base64_encoded=false`,
+      { submissions },
+      { headers: judge0Headers(), timeout: 15000 }
+    );
+    return res.data.map(t => t.token);
+  } catch (err) {
+    if (err.response?.status === 503) throw new QueueFullError();
+    throw err;
+  }
+};
+
+// Poll until every token has a terminal status (id > 2)
+const pollBatch = async (tokens) => {
+  const joined = tokens.join(',');
+  for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    const res = await axios.get(
+      `${JUDGE0_URL}/submissions/batch?tokens=${joined}&base64_encoded=false`,
+      { headers: judge0Headers(), timeout: 15000 }
+    );
+    const subs = res.data.submissions;
+    if (subs.every(s => s.status?.id > 2)) return subs;
+  }
+  throw new Error('Batch polling timed out after 30 s');
+};
+
+// Hard cap on any text field coming back from Judge0 — defence-in-depth on top
+// of STDOUT_LIMIT in judge0.conf.  Keeps the DB column and socket payload safe.
+const MAX_OUTPUT_BYTES = 65536; // 64 KB
+const TRUNCATION_NOTICE = '\n[output truncated by server]';
+
+const capOutput = (s) => {
+  if (!s) return s;
+  if (Buffer.byteLength(s, 'utf8') <= MAX_OUTPUT_BYTES) return s;
+  // Slice by char index that keeps us under the byte limit
+  let byteCount = 0;
+  let i = 0;
+  while (i < s.length) {
+    byteCount += Buffer.byteLength(s[i], 'utf8');
+    if (byteCount > MAX_OUTPUT_BYTES) break;
+    i++;
+  }
+  return s.slice(0, i) + TRUNCATION_NOTICE;
+};
+
+const sanitizeResult = (r) => ({
+  ...r,
+  stdout:         capOutput(r.stdout),
+  stderr:         capOutput(r.stderr),
+  compile_output: capOutput(r.compile_output),
+  message:        capOutput(r.message),
+});
+
+const normalizeOutput = (str) => {
+  if (!str) return '';
+  // Fast-exit: if the string is huge it has already failed the cap check above
+  const s = str.length > 4096 ? str.slice(0, 4096) : str;
+  return s.replace(/\[|\]|\{|\}|"|'|,/g, ' ').trim().split(/\s+/).join(' ');
+};
+
+// Upsert topic mastery after a submission verdict
+const updateTopicMastery = async (userId, problemId, isAccepted, hintUsed) => {
+  try {
+    const tagResult = await db.query(
+      'SELECT tags FROM problems WHERE id = $1',
+      [problemId]
+    );
+    const tags = tagResult.rows[0]?.tags || [];
+
+    for (const tag of tags) {
+      if (isAccepted) {
+        await db.query(`
+          INSERT INTO student_topic_mastery (user_id, topic, solved_count, failed_count, hint_usage_count)
+          VALUES ($1, $2, 1, 0, $3)
+          ON CONFLICT (user_id, topic) DO UPDATE
+          SET solved_count = student_topic_mastery.solved_count + 1,
+              hint_usage_count = student_topic_mastery.hint_usage_count + $3
+        `, [userId, tag, hintUsed ? 1 : 0]);
+      } else {
+        await db.query(`
+          INSERT INTO student_topic_mastery (user_id, topic, solved_count, failed_count, hint_usage_count)
+          VALUES ($1, $2, 0, 1, 0)
+          ON CONFLICT (user_id, topic) DO UPDATE
+          SET failed_count = student_topic_mastery.failed_count + 1
+        `, [userId, tag]);
+      }
+    }
+  } catch (err) {
+    // Non-critical: log but don't fail the submission
+    console.error('Topic mastery update failed:', err.message);
+  }
+};
+
+const MAX_ATTEMPTS = 3;
+
+const judgeWorker = new Worker('submissions', async job => {
+  const { problem_id, source_code, language_id, user_id, custom_input, contest_id } = job.data;
+  try {
+    return await runJob(job, { problem_id, source_code, language_id, user_id, custom_input, contest_id });
+  } catch (err) {
+    if (err.name === 'QueueFullError') {
+      getIO()?.to(job.id).emit('judging_retry', {
+        attempt:     job.attemptsMade,
+        maxAttempts: MAX_ATTEMPTS,
+      });
+    }
+    throw err;
+  }
+}, { connection });
+
+async function runJob(job, { problem_id, source_code, language_id, user_id, custom_input, contest_id }) {
+
+  console.log(`Processing Job ${job.id} for Problem ${problem_id}${custom_input ? ' [custom input]' : ''}`);
+
+  // Custom input: single run, no verdict persistence
+  if (custom_input !== null && custom_input !== undefined) {
+    await job.updateProgress(50);
+    const result = await runSingle(source_code, language_id, custom_input);
+    await job.updateProgress(100);
+    return {
+      verdict: result.status,
+      time: parseFloat(result.time) || 0,
+      memory: result.memory || 0,
+      test_case_results: [result],
+      custom_run: true
+    };
+  }
+
   const { rows: testCases } = await db.query(
-    'SELECT input_data, expected_output FROM test_cases WHERE problem_id = $1',
+    'SELECT input_data, expected_output, score, is_public FROM test_cases WHERE problem_id = $1',
     [problem_id]
   );
 
@@ -50,77 +203,228 @@ const judgeWorker = new Worker('submissions', async job => {
     throw new Error('No test cases found for problem');
   }
 
+  // Fetch scoring mode + special-judge config for this problem
+  const { rows: [probMeta] } = await db.query(
+    'SELECT scoring_mode, max_score, uses_checker, checker_code, checker_language_id FROM problems WHERE id = $1',
+    [problem_id]
+  );
+  const scoringMode = probMeta?.scoring_mode || 'acm';
+  const maxScore    = probMeta?.max_score    || 100;
+  const isOI        = scoringMode === 'oi';
+
+  // Special judge: when enabled, a faculty-provided checker program decides
+  // AC/WA instead of the normalized string compare below.
+  const usesChecker       = !!probMeta?.uses_checker;
+  const checkerCode       = probMeta?.checker_code || null;
+  const checkerLanguageId = probMeta?.checker_language_id || null;
+
+  // In OI mode: if all test-case scores are 0, distribute max_score evenly
+  const totalTcScore = testCases.reduce((s, tc) => s + (tc.score || 0), 0);
+  const useEvenSplit = isOI && totalTcScore === 0;
+  const perTcScore   = useEvenSplit ? Math.floor(maxScore / testCases.length) : 0;
+
   let finalVerdict = { id: 3, description: 'Accepted' };
   let maxTime = 0;
   let maxMemory = 0;
   const results = [];
+  let earlyExit = false;
+  let earnedScore = 0;
+  let passedCount = 0;
 
-  // Iterate and run each test case
-  for (let i = 0; i < testCases.length; i++) {
-    const tc = testCases[i];
-    
-    // Update job progress
-    await job.updateProgress(Math.floor((i / testCases.length) * 100));
+  // Split into chunks of BATCH_SIZE (Judge0 default max is 20)
+  for (let chunkStart = 0; chunkStart < testCases.length && !earlyExit; chunkStart += BATCH_SIZE) {
+    const chunk = testCases.slice(chunkStart, chunkStart + BATCH_SIZE);
 
-    const result = await runTestCase(source_code, language_id, tc.input_data);
-    
-    // Custom Robust Output Comparison
-    if (result.status.id === 3) {
-      const userOutput = normalizeOutput(result.stdout);
-      const expectedOut = normalizeOutput(tc.expected_output);
-      
-      if (userOutput !== expectedOut) {
-        result.status = { id: 4, description: 'Wrong Answer' };
-        result.message = `Expected: ${tc.expected_output}\nGot: ${result.stdout}`;
+    // One HTTP call for the whole chunk (limits applied per language)
+    const m = getLangMultiplier(language_id);
+    const tokens = await submitBatch(
+      chunk.map(tc => ({
+        source_code,
+        language_id,
+        stdin:           tc.input_data,
+        cpu_time_limit:  2  * m,
+        wall_time_limit: 5  * m,
+        memory_limit:    262144 * m,
+      }))
+    );
+
+    await job.updateProgress(Math.floor((chunkStart / testCases.length) * 80));
+
+    // Poll until all tokens in this chunk are done
+    const batchResults = await pollBatch(tokens);
+
+    for (let i = 0; i < batchResults.length; i++) {
+      const r  = batchResults[i];
+      const tc = chunk[i];
+
+      const result = sanitizeResult({
+        status:         r.status,
+        time:           r.time,
+        memory:         r.memory,
+        stdout:         r.stdout,
+        stderr:         r.stderr,
+        compile_output: r.compile_output,
+        message:        r.message,
+      });
+
+      if (result.status.id === 3) {
+        if (usesChecker) {
+          // Special judge: delegate the verdict to the faculty checker program.
+          const checkResult = await runChecker({
+            checkerCode,
+            checkerLanguageId,
+            input:    tc.input_data,
+            expected: tc.expected_output,
+            actual:   result.stdout,
+          });
+          if (!checkResult.accepted) {
+            result.status  = { id: 4, description: 'Wrong Answer' };
+            result.message = checkResult.message || 'Rejected by special judge';
+          }
+        } else {
+          const userOutput  = normalizeOutput(result.stdout);
+          const expectedOut = normalizeOutput(tc.expected_output);
+          if (userOutput !== expectedOut) {
+            result.status  = { id: 4, description: 'Wrong Answer' };
+            // Only reveal expected output for PUBLIC test cases.
+            result.message = tc.is_public
+              ? `Expected: ${tc.expected_output}\nGot: ${result.stdout}`
+              : 'Wrong answer on a hidden test case.';
+          }
+        }
       }
-    }
 
-    results.push(result);
+      const passed = result.status.id === 3;
+      if (passed) {
+        passedCount++;
+        earnedScore += useEvenSplit ? perTcScore : (tc.score || 0);
+      }
 
-    const time = parseFloat(result.time) || 0;
-    if (time > maxTime) maxTime = time;
-    if (result.memory > maxMemory) maxMemory = result.memory;
+      // Attach test metadata. Input/expected are exposed ONLY for public tests
+      // so the UI and AI tutor never leak hidden-test answers.
+      results.push({
+        ...result,
+        passed,
+        tc_score:  useEvenSplit ? perTcScore : (tc.score || 0),
+        is_public: !!tc.is_public,
+        input:     tc.is_public ? tc.input_data      : null,
+        expected:  tc.is_public ? tc.expected_output : null,
+      });
 
-    if (result.status.id !== 3) { 
-      finalVerdict = result.status;
-      break;
+      const time = parseFloat(result.time) || 0;
+      if (time > maxTime) maxTime = time;
+      if (result.memory > maxMemory) maxMemory = result.memory;
+
+      if (!passed) {
+        // ACM: stop immediately on first failure
+        // OI: keep running all test cases to accumulate partial score
+        if (!isOI) {
+          finalVerdict = result.status;
+          earlyExit = true;
+          break;
+        } else {
+          // Record the first failing status for the overall verdict label
+          if (finalVerdict.id === 3) finalVerdict = result.status;
+        }
+      }
     }
   }
 
-  // Set 100% progress
+  // Determine final OI verdict
+  if (isOI) {
+    if (passedCount === testCases.length) {
+      finalVerdict = { id: 3, description: 'Accepted' };
+    } else if (earnedScore > 0) {
+      finalVerdict = { id: 7, description: 'Partial' };
+    }
+    // else keep the first error verdict (TLE / CE / WA)
+  }
+
   await job.updateProgress(100);
 
-  // Insert submission record into database
+  const finalScore = isOI ? earnedScore : null;
+  // Ordered pass/fail per test case that ran (powers the concept heatmap).
+  const testResultsJson = JSON.stringify(results.map(r => !!r.passed));
+
+  // Insert submission record — cap source_code before writing to DB
   const insertResult = await db.query(
-    `INSERT INTO code_submissions (user_id, problem_id, code, language, verdict, runtime, memory)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    `INSERT INTO code_submissions (user_id, problem_id, code, language, verdict, runtime, memory, score, test_results)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
     [
-      user_id || null, 
-      problem_id, 
-      source_code, 
-      language_id.toString(), 
-      finalVerdict.description, 
-      Math.floor(maxTime * 1000), // convert s to ms
-      maxMemory
+      user_id || null,
+      problem_id,
+      capOutput(source_code),
+      language_id.toString(),
+      finalVerdict.description,
+      Math.floor(maxTime * 1000),
+      maxMemory,
+      finalScore,
+      testResultsJson,
     ]
   );
+
+  // Update topic mastery (non-blocking)
+  if (user_id) {
+    const isAccepted = finalVerdict.description === 'Accepted';
+    await updateTopicMastery(user_id, problem_id, isAccepted, false);
+  }
+
+  // Record a contest submission when this was submitted within a contest.
+  // Guarded: the contest must exist, be within its window, contain the problem,
+  // and the user must be registered. Failures here never fail the judging.
+  if (contest_id && user_id) {
+    try {
+      const { rows: [ok] } = await db.query(
+        `SELECT 1
+           FROM contests c
+           JOIN contest_problems cp ON cp.contest_id = c.id AND cp.problem_id = $2
+           JOIN contest_registrations cr ON cr.contest_id = c.id AND cr.user_id = $3
+          WHERE c.id = $1 AND NOW() BETWEEN c.starts_at AND c.ends_at
+          LIMIT 1`,
+        [contest_id, problem_id, user_id]
+      );
+      if (ok) {
+        await db.query(
+          `INSERT INTO contest_submissions (contest_id, user_id, problem_id, verdict, score, is_virtual)
+           VALUES ($1, $2, $3, $4, $5, FALSE)`,
+          [contest_id, user_id, problem_id, finalVerdict.description, finalScore || 0]
+        );
+        // Notify the contest room so live scoreboards refresh (A2).
+        getIO()?.to(`contest:${contest_id}`).emit('scoreboard_update', { contest_id });
+      }
+    } catch (e) {
+      console.error('Contest submission record failed:', e.message);
+    }
+  }
 
   return {
     submission_id: insertResult.rows[0].id,
     verdict: finalVerdict,
     time: maxTime,
     memory: maxMemory,
-    test_case_results: results
+    score: finalScore,
+    max_score: isOI ? maxScore : null,
+    scoring_mode: scoringMode,
+    passed_count: passedCount,
+    total_count: testCases.length,
+    test_case_results: results,
   };
 
-}, { connection });
+}
 
-judgeWorker.on('completed', job => {
-  console.log(`Job ${job.id} has completed with verdict: ${job.returnvalue.verdict.description}`);
+judgeWorker.on('completed', (job) => {
+  const verdict = job.returnvalue?.verdict?.description;
+  console.log(`Job ${job.id} completed — verdict: ${verdict}`);
+  getIO()?.to(job.id).emit('verdict', { success: true, state: 'completed', result: job.returnvalue });
 });
 
 judgeWorker.on('failed', (job, err) => {
-  console.error(`Job ${job.id} has failed with ${err.message}`);
+  console.error(`Job ${job.id} failed: ${err.message}`);
+  getIO()?.to(job.id).emit('verdict', { success: false, state: 'failed', error: err.message });
+});
+
+judgeWorker.on('error', err => {
+  console.error('Judge worker error:', err.message);
 });
 
 module.exports = judgeWorker;

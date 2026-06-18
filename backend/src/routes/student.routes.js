@@ -1,14 +1,33 @@
 const express = require('express');
-const { getDashboardData, getAssignments, getNotifications } = require('../controllers/student.controller');
+const {
+  getDashboardData,
+  getAssignments,
+  getNotifications,
+  getRecommendations,
+  getLeaderboard,
+  getSolvedProblems,
+  getDailyChallenge,
+  updateProfile,
+  getPlacementReadiness,
+  getBadges,
+  getProblemSolutions
+} = require('../controllers/student.controller');
 const { protect } = require('../middleware/auth.middleware');
 
 const router = express.Router();
 
-// All student routes require authentication
 router.use(protect);
 
 router.get('/dashboard', getDashboardData);
 router.get('/assignments', getAssignments);
 router.get('/notifications', getNotifications);
+router.get('/recommendations', getRecommendations);
+router.get('/leaderboard', getLeaderboard);
+router.get('/solved-problems', getSolvedProblems);
+router.get('/daily-challenge', getDailyChallenge);
+router.get('/placement', getPlacementReadiness);
+router.get('/badges', getBadges);
+router.get('/problems/:id/solutions', getProblemSolutions);
+router.put('/profile', updateProfile);
 
 module.exports = router;
