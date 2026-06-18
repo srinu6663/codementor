@@ -68,24 +68,6 @@ const scaffoldDatabase = async () => {
         ADD COLUMN IF NOT EXISTS max_score INTEGER NOT NULL DEFAULT 100;
     `);
 
-    // Per-test-case score used in OI mode (evenly split if all 0).
-    await query(`
-      ALTER TABLE test_cases
-        ADD COLUMN IF NOT EXISTS score INTEGER NOT NULL DEFAULT 0;
-    `);
-
-    // Store the final score (OI partial) alongside each submission.
-    await query(`
-      ALTER TABLE code_submissions
-        ADD COLUMN IF NOT EXISTS score INTEGER DEFAULT NULL;
-    `);
-
-    // Per-test-case pass/fail array (ordered) — powers the faculty concept heatmap.
-    await query(`
-      ALTER TABLE code_submissions
-        ADD COLUMN IF NOT EXISTS test_results JSONB DEFAULT NULL;
-    `);
-
     // Scaffold Test Cases Table (essential for judging)
     await query(`
       CREATE TABLE IF NOT EXISTS test_cases (
@@ -111,6 +93,23 @@ const scaffoldDatabase = async () => {
         memory INTEGER,
         submitted_at TIMESTAMP DEFAULT NOW()
       );
+    `);
+
+    // Per-test-case score used in OI mode (evenly split if all 0).
+    // (Runs AFTER test_cases & code_submissions exist — order matters on a fresh DB.)
+    await query(`
+      ALTER TABLE test_cases
+        ADD COLUMN IF NOT EXISTS score INTEGER NOT NULL DEFAULT 0;
+    `);
+    // Store the final score (OI partial) alongside each submission.
+    await query(`
+      ALTER TABLE code_submissions
+        ADD COLUMN IF NOT EXISTS score INTEGER DEFAULT NULL;
+    `);
+    // Per-test-case pass/fail array (ordered) — powers the faculty concept heatmap.
+    await query(`
+      ALTER TABLE code_submissions
+        ADD COLUMN IF NOT EXISTS test_results JSONB DEFAULT NULL;
     `);
 
     // Scaffold Assignments Table

@@ -43,6 +43,10 @@ require('./workers/judge.worker');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Behind a reverse proxy (Caddy/Nginx) — trust the first proxy hop so
+// req.ip and X-Forwarded-For resolve correctly for rate limiting.
+app.set('trust proxy', 1);
+
 // ── CORS origins ──────────────────────────────────────────────────────────────
 // CORS_ORIGIN may be a single origin or a comma-separated list (dev + prod domains).
 // '*' allows all (dev fallback). Used for both HTTP and Socket.IO.
