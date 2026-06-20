@@ -7,11 +7,15 @@ export type WorkspaceStatus = "idle" | "judging" | "ran" | "accepted" | "wrong" 
 
 interface VerdictBannerProps {
   status: WorkspaceStatus;
-  failingTest?: { input: string | null; expected: string | null; output: string; hidden?: boolean } | null;
-  runtimeMs?: number | null;
-  memoryMB?: number | null;
-  testsPassed?: number;
-  testsTotal?: number;
+  data?: {
+    failingTest?: { input: string | null; expected: string | null; output: string; hidden?: boolean } | null;
+    runtimeMs?: number | null;
+    memoryMB?: number | null;
+    testsPassed?: number;
+    testsTotal?: number;
+    [key: string]: any;
+  };
+  errorMsg?: string;
   onNext?: () => void;
   onAskTutor?: () => void;
   onRetry?: () => void;
@@ -20,16 +24,14 @@ interface VerdictBannerProps {
 
 export function VerdictBanner({
   status,
-  failingTest,
-  runtimeMs,
-  memoryMB,
-  testsPassed = 0,
-  testsTotal = 0,
+  data,
   onNext,
   onAskTutor,
   onRetry,
   onDismiss,
+  errorMsg,
 }: VerdictBannerProps) {
+  const { failingTest, runtimeMs, memoryMB, testsPassed = 0, testsTotal = 0 } = data || {};
   const fired = useRef(false);
 
   useEffect(() => {
@@ -56,17 +58,24 @@ export function VerdictBanner({
 
   if (status === "accepted") {
     return (
-      <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} className="border-b border-success/30 bg-success/10 px-5 py-4">
+      <motion.div initial={{ opacity: 0, y: 16, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} className="fixed bottom-6 right-6 z-50 w-[420px] rounded-lg shadow-2xl border border-success/30 bg-success/10 backdrop-blur-md px-5 py-4">
         <div className="flex items-start gap-3">
           <CheckCircle2 className="w-5 h-5 text-success mt-0.5 flex-shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-success font-semibold">Accepted</h3>
-              {onNext && (
-                <button onClick={onNext} className="flex items-center gap-1.5 px-3 py-1.5 bg-success text-white text-sm font-semibold hover:bg-[#16A34A] transition-colors">
-                  Next problem <ArrowRight className="w-4 h-4" />
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {onNext && (
+                  <button onClick={onNext} className="flex items-center gap-1.5 px-3 py-1.5 bg-success text-white text-sm font-semibold hover:bg-[#16A34A] transition-colors rounded">
+                    Next problem <ArrowRight className="w-4 h-4" />
+                  </button>
+                )}
+                {onDismiss && (
+                  <button onClick={onDismiss} className="p-1.5 text-success/70 hover:text-success hover:bg-success/20 rounded transition-colors" title="Dismiss">
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
             </div>
             <p className="text-sm text-foreground mt-0.5 mb-3">
               All {testsTotal || "all"} test cases passed. Nicely done.
@@ -85,7 +94,7 @@ export function VerdictBanner({
 
   if (status === "wrong") {
     return (
-      <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} className="border-b border-destructive/30 bg-destructive/8 px-5 py-4">
+      <motion.div initial={{ opacity: 0, y: 16, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} className="fixed bottom-6 right-6 z-50 w-[480px] rounded-lg shadow-2xl border border-destructive/30 bg-destructive/10 backdrop-blur-md px-5 py-4">
         <div className="flex items-start gap-3">
           <XCircle className="w-5 h-5 text-destructive mt-0.5 flex-shrink-0" />
           <div className="flex-1 min-w-0">
@@ -128,18 +137,25 @@ export function VerdictBanner({
 
   // Network / execution error
   return (
-    <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} className="border-b border-warning/30 bg-warning/10 px-5 py-4">
-      <div className="flex items-center gap-3">
-        <WifiOff className="w-5 h-5 text-warning flex-shrink-0" />
+    <motion.div initial={{ opacity: 0, y: 16, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} className="fixed bottom-6 right-6 z-50 w-[420px] rounded-lg shadow-2xl border border-warning/30 bg-warning/10 backdrop-blur-md px-5 py-4">
+      <div className="flex items-start gap-3">
+        <WifiOff className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
         <div className="flex-1">
-          <h3 className="text-warning font-semibold">Couldn't reach the judge</h3>
-          <p className="text-sm text-foreground mt-0.5">Your code is saved. Check your connection and try again.</p>
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-warning font-semibold">Submission couldn't be judged</h3>
+            {onDismiss && (
+              <button onClick={onDismiss} className="p-1.5 text-warning/70 hover:text-warning hover:bg-warning/20 rounded transition-colors" title="Dismiss">
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          <p className="text-sm text-foreground mt-0.5 mb-3">{errorMsg || 'Your code is saved. Check your connection and try again.'}</p>
+          {onRetry && (
+            <button onClick={onRetry} className="flex w-fit items-center gap-1.5 px-3 py-1.5 border border-warning/50 text-warning text-sm font-medium hover:bg-warning/20 rounded transition-colors">
+              <RefreshCw className="w-4 h-4" /> Retry
+            </button>
+          )}
         </div>
-        {onRetry && (
-          <button onClick={onRetry} className="flex items-center gap-1.5 px-3 py-1.5 border border-warning/50 text-warning text-sm font-medium hover:bg-warning/10 transition-colors">
-            <RefreshCw className="w-4 h-4" /> Retry
-          </button>
-        )}
       </div>
     </motion.div>
   );

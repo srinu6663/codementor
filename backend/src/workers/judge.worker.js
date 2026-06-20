@@ -19,6 +19,44 @@ const judge0Headers = () => {
   };
 };
 
+// Translate a low-level error (axios / network / Judge0 HTTP status) into a clear,
+// user-facing explanation so students/faculty understand WHAT went wrong, not just
+// "connect ECONNREFUSED". Used by the worker's failed-job handler.
+function friendlyJudgeError(err) {
+  if (err?.name === 'QueueFullError') {
+    return 'The judge is busy (submission queue is full). It will retry automatically — please wait a moment.';
+  }
+  const status = err?.response?.status;
+  const code   = err?.code || err?.cause?.code || '';
+  const msg    = err?.message || '';
+
+  if (code === 'ECONNREFUSED' || /ECONNREFUSED/.test(msg)) {
+    return 'The code-execution engine (Judge0) is offline or still starting up. Please make sure the judge service is running, then try again.';
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || /ENOTFOUND|getaddrinfo/.test(msg)) {
+    return 'Cannot reach the judge service (host not found). Check that Judge0 is running and JUDGE0_URL is correct.';
+  }
+  if (code === 'ECONNABORTED' || /timeout/i.test(msg)) {
+    return 'The judge took too long to respond — it may be overloaded, or a program ran too long. Please try again.';
+  }
+  if (status === 422) {
+    return 'The judge rejected this submission (invalid execution limits). This is a server configuration issue — please report it to the administrator.';
+  }
+  if (status === 401 || status === 403) {
+    return 'The judge rejected the request (authentication failed). Check the JUDGE0_AUTH_TOKEN setting.';
+  }
+  if (status === 503) {
+    return 'The judge is temporarily overloaded. Please try again in a few seconds.';
+  }
+  if (/No test cases/i.test(msg)) {
+    return 'This problem has no test cases configured yet. Please contact the faculty/administrator.';
+  }
+  if (/polling timed out/i.test(msg)) {
+    return 'Judging timed out while waiting for results — the judge may be overloaded. Please try again.';
+  }
+  return `Judging failed: ${msg || 'unknown error'}. Please try again or contact the administrator.`;
+}
+
 // Per-language multipliers — slower runtimes get proportionally more time/memory.
 // Keys are Judge0 language IDs.
 // C/C++ = 1×, Java = 2×, Python/JS/TypeScript = 3×, others default to 2×
@@ -419,8 +457,14 @@ judgeWorker.on('completed', (job) => {
 });
 
 judgeWorker.on('failed', (job, err) => {
-  console.error(`Job ${job.id} failed: ${err.message}`);
-  getIO()?.to(job.id).emit('verdict', { success: false, state: 'failed', error: err.message });
+  const friendly = friendlyJudgeError(err);
+  console.error(`Job ${job.id} failed: ${err.message}  →  "${friendly}"`);
+  getIO()?.to(job.id).emit('verdict', {
+    success: false,
+    state: 'failed',
+    error: friendly,
+    code: err?.code || err?.response?.status || null,
+  });
 });
 
 judgeWorker.on('error', err => {

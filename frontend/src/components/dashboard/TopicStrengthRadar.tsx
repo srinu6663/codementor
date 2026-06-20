@@ -20,7 +20,8 @@ const defaultData: TopicData[] = [
 ];
 
 export function TopicStrengthRadar({ data = defaultData }: Props) {
-  const chartData = data.map((d) => ({ topic: d.topic, score: d.mastery, fullMark: 100 }));
+  const effectiveData = data && data.length > 0 ? data : defaultData;
+  const chartData = effectiveData.map((d) => ({ topic: d.topic, score: d.mastery === 0 ? 0.01 : d.mastery, fullMark: 100 }));
   const focusAreas = chartData.filter((d) => d.score < 50);
 
   return (

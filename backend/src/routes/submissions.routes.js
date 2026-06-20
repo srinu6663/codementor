@@ -63,10 +63,16 @@ router.post('/submit', submitBurstLimiter, submitSustainedLimiter, enforceExamIP
       }, { jobId });
     } catch (queueErr) {
       console.error('Queue add failed:', queueErr.message);
+      // Distinguish "Redis/queue is offline" from "queue is full" so the user
+      // gets an accurate message (retrying won't help if the queue is down).
+      const offline = /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|connection is closed|stream isn'?t writeable|enableofflinequeue/i
+        .test(queueErr.message || '');
       return res.status(503).json({
         success: false,
-        queue_full: true,
-        error: 'The judge is currently overloaded. Please try again in a moment.',
+        queue_full: !offline,
+        error: offline
+          ? 'The submission service is offline — the job queue (Redis) is unreachable. Please ensure the backend services are running and try again.'
+          : 'The judge is currently overloaded. Please try again in a moment.',
       });
     }
 

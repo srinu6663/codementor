@@ -7,7 +7,7 @@ const { resolvePermissions } = require('../middleware/permissions');
 const generateTokens = (user) => {
   const permissions = resolvePermissions(user);
   const payload = { id: user.id, role: user.role, permissions };
-  const accessToken  = jwt.sign(payload, process.env.JWT_SECRET,         { expiresIn: '15m' });
+  const accessToken  = jwt.sign(payload, process.env.JWT_SECRET,         { expiresIn: '1h' });
   const refreshToken = jwt.sign(payload, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
   return { accessToken, refreshToken };
 };
@@ -145,10 +145,13 @@ exports.refresh = async (req, res) => {
       return res.status(401).json({ success: false, error: 'User no longer exists' });
     }
 
+    // Re-resolve permissions so the refreshed token is consistent with login
+    const { resolvePermissions } = require('../middleware/permissions');
+    const permissions = resolvePermissions(user.rows[0]);
     const newAccessToken = jwt.sign(
-      { id: user.rows[0].id, role: user.rows[0].role }, 
-      process.env.JWT_SECRET, 
-      { expiresIn: '15m' }
+      { id: user.rows[0].id, role: user.rows[0].role, permissions },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
     );
 
     res.json({ success: true, accessToken: newAccessToken });

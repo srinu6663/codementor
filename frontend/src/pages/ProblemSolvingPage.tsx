@@ -15,11 +15,12 @@ import { VerdictBadge } from '../components/problem/VerdictBadge';
 import { AITutorSidebar } from '../components/problem/AITutorSidebar';
 import { MarkdownRenderer } from '../components/problem/MarkdownRenderer';
 import { CodeReviewPanel } from '../components/problem/CodeReviewPanel';
+import { ProblemListPanel } from '../components/problem/ProblemListPanel';
 import { useProctor } from '../hooks/useProctor';
 import {
   Code, ChevronLeft, ChevronRight, ChevronDown, Bot, List, Terminal, ChevronUp,
   Play, RotateCcw, RefreshCw, Settings, Lightbulb, Lock, FileText, CheckCircle2, MessageSquare,
-  Cpu, Timer, X, BookOpen, Sparkles, ShieldAlert, Maximize, Users
+  Cpu, Timer, X, BookOpen, Sparkles, ShieldAlert, Maximize, Users, ArrowRight, XCircle, WifiOff
 } from 'lucide-react';
 
 const LANGUAGES = [
@@ -31,21 +32,110 @@ const LANGUAGES = [
 
 const LANG_KEY  = 'codesphere:editor-language';
 const FONT_KEY  = 'codesphere:editor-fontsize';
-const TOTAL_TESTS = 10;
-
 const codeKey = (problemId: string, langName: string) =>
   `codesphere:code:${problemId}:${langName}`;
 
-// Celebrate an Accepted verdict — skipped when the user prefers reduced motion.
-const celebrate = () => {
-  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-  const fire = (ratio: number, opts: confetti.Options) =>
-    confetti({ origin: { y: 0.7 }, particleCount: Math.floor(160 * ratio), zIndex: 9999, ...opts });
-  fire(0.25, { spread: 26, startVelocity: 55 });
-  fire(0.35, { spread: 60 });
-  fire(0.2,  { spread: 100, decay: 0.91, scalar: 0.8 });
-  fire(0.1,  { spread: 120, startVelocity: 25, decay: 0.92, scalar: 1.2 });
-};
+// ── Live Python syntax checker ────────────────────────────────────────────────
+// Detects missing colons and indentation issues while typing.
+function getPythonMarkers(code: string): any[] {
+  const markers: any[] = [];
+  const lines = code.split('\n');
+  let expectIndent = false;
+  let baseIndent = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const stripped = raw.trimStart();
+    if (!stripped || stripped.startsWith('#')) continue;
+
+    const indent = raw.length - stripped.length;
+
+    // Line after a colon must be indented more
+    if (expectIndent && indent <= baseIndent) {
+      markers.push({
+        severity: 8,
+        startLineNumber: i + 1, endLineNumber: i + 1,
+        startColumn: indent + 1, endColumn: stripped.length + indent + 1,
+        message: 'IndentationError: expected an indented block',
+      });
+      expectIndent = false;
+    }
+
+    // Compound keywords must end with ':'
+    const kw = stripped.match(/^(if|elif|else|for|while|def|class|try|except|finally|with)\b/);
+    if (kw) {
+      const noComment = stripped.split('#')[0].trimEnd();
+      const openParens = (noComment.match(/\(/g) || []).length - (noComment.match(/\)/g) || []).length;
+      const endsColon = noComment.endsWith(':');
+      const cont = noComment.endsWith('\\');
+      if (!endsColon && !cont && openParens === 0 && noComment.length > kw[1].length + 1) {
+        markers.push({
+          severity: 8,
+          startLineNumber: i + 1, endLineNumber: i + 1,
+          startColumn: indent + 1, endColumn: raw.length + 1,
+          message: `SyntaxError: expected ':' after '${kw[1]}' statement`,
+        });
+      }
+      if (endsColon) { expectIndent = true; baseIndent = indent; }
+      else { expectIndent = false; }
+    } else {
+      expectIndent = false;
+    }
+  }
+  return markers;
+}
+
+// ── Parse Judge0 compile/runtime output → Monaco markers ─────────────────────
+function parseJudge0Markers(output: string, lang: string): any[] {
+  const markers: any[] = [];
+  if (!output) return markers;
+
+  if (lang === 'Python') {
+    const lineM = output.match(/line (\d+)/);
+    const errM  = output.match(/(SyntaxError|IndentationError|NameError|TypeError|ValueError|AttributeError|ImportError|ZeroDivisionError|RuntimeError)[:\s]*(.*)/);
+    if (lineM) {
+      markers.push({
+        severity: 8,
+        startLineNumber: +lineM[1], endLineNumber: +lineM[1],
+        startColumn: 1, endColumn: 1000,
+        message: errM ? `${errM[1]}: ${errM[2].trim()}` : output.split('\n').slice(-2)[0]?.trim() || 'Python error',
+      });
+    }
+  } else if (lang === 'C++') {
+    const re = /[^\n:]*:(\d+):(\d+):\s*(?:fatal\s+)?error:\s*(.+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(output)) !== null) {
+      markers.push({
+        severity: 8,
+        startLineNumber: +m[1], endLineNumber: +m[1],
+        startColumn: +m[2], endColumn: +m[2] + 1,
+        message: m[3].trim(),
+      });
+    }
+  } else if (lang === 'Java') {
+    const re = /[^\n:]*:(\d+):\s*error:\s*(.+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(output)) !== null) {
+      markers.push({
+        severity: 8,
+        startLineNumber: +m[1], endLineNumber: +m[1],
+        startColumn: 1, endColumn: 1000,
+        message: m[2].trim(),
+      });
+    }
+  } else if (lang === 'JavaScript') {
+    const m = output.match(/:(\d+)/);
+    if (m) {
+      markers.push({
+        severity: 8,
+        startLineNumber: +m[1], endLineNumber: +m[1],
+        startColumn: 1, endColumn: 1000,
+        message: output.split('\n')[0]?.trim() || 'Runtime Error',
+      });
+    }
+  }
+  return markers;
+}
 
 export default function ProblemSolvingPage() {
   const { id } = useParams();
@@ -91,7 +181,7 @@ export default function ProblemSolvingPage() {
   // ── Workspace state ─────────────────────────────────────────────────────────
   const [status, setStatus]         = useState<WorkspaceStatus>('idle');
   const [drawerOpen, setDrawerOpen] = useState(true);
-  const [showAI, setShowAI]         = useState(true);
+  const [showAI, setShowAI]         = useState(false);
   const [tutorContext, setTutorContext] = useState<string | undefined>(undefined);
   const [leftTab, setLeftTab]       = useState('description');
   const [solved, setSolved]         = useState(false);
@@ -101,12 +191,24 @@ export default function ProblemSolvingPage() {
   const [community, setCommunity]           = useState<{ id: string; author: string; language: string; runtime: number | null; code: string }[]>([]);
   const [communityState, setCommunityState] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [communityErr, setCommunityErr]     = useState<string | null>(null);
-  const [progress, setProgress]     = useState({ current: 0, total: TOTAL_TESTS });
+  
+  const totalTests = problem?.test_cases_count || problem?.examples?.length || 5;
+  const [progress, setProgress]     = useState({ current: 0, total: 5 });
+  
+  const [showProblemList, setShowProblemList] = useState(false);
   const [activeOutputTab, setActiveOutputTab] = useState('cases');
   const [activeTestCase, setActiveTestCase]   = useState(0);
-  const [timeElapsed, setTimeElapsed] = useState(0);
+  const [timeElapsed, setTimeElapsed] = useState(() => {
+    const seg = window.location.pathname.match(/\/problems\/([^/]+)/);
+    if (seg?.[1]) {
+      const saved = localStorage.getItem(`codesphere:timer:${seg[1]}`);
+      if (saved) return parseInt(saved, 10);
+    }
+    return 0;
+  });
   const [isTimerRunning, setIsTimerRunning] = useState(true);
   const [retryMsg, setRetryMsg]     = useState<string | null>(null);
+  const [judgeError, setJudgeError] = useState<string | null>(null);
 
   // ── Verdict result data ─────────────────────────────────────────────────────
   const [verdictData, setVerdictData] = useState<{
@@ -130,7 +232,7 @@ export default function ProblemSolvingPage() {
 
   useEffect(() => {
     const socket = io(import.meta.env.VITE_API_URL || window.location.origin, {
-      transports: ['websocket', 'polling'],
+      transports: ['polling', 'websocket'],
     });
     socketRef.current = socket;
     return () => { socket.disconnect(); };
@@ -160,10 +262,26 @@ export default function ProblemSolvingPage() {
     setCode(saved ?? stub ?? language.defaultCode);
   }, [id, language]);
 
+  // ── Timer persistence per problem ────────────────────────────────────────────
+  useEffect(() => {
+    if (!id) return;
+    localStorage.setItem(`codesphere:timer:${id}`, String(timeElapsed));
+  }, [timeElapsed, id]);
+
   const handleCodeChange = (val: string | undefined) => {
     const newCode = val || '';
     setCode(newCode);
     if (id) localStorage.setItem(codeKey(id, language.name), newCode);
+
+    // Debounced live lint for Python (JS/TS is handled by Monaco's built-in TS worker)
+    if (language.monacoLang === 'python' && editorRef.current && monacoRef.current) {
+      if (lintTimer.current) clearTimeout(lintTimer.current);
+      lintTimer.current = setTimeout(() => {
+        const model = editorRef.current?.getModel();
+        if (!model) return;
+        monacoRef.current.editor.setModelMarkers(model, 'live-lint', getPythonMarkers(newCode));
+      }, 350);
+    }
   };
 
   // Peer code review — fetch other students' accepted solutions once the Community tab opens.
@@ -211,11 +329,47 @@ export default function ProblemSolvingPage() {
   // ── Monaco mount ─────────────────────────────────────────────────────────────
   const onRunRef    = useRef<() => void>(() => {});
   const onSubmitRef = useRef<() => void>(() => {});
+  const editorRef   = useRef<any>(null);
+  const monacoRef   = useRef<any>(null);
+  const lintTimer   = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleEditorMount: OnMount = (editor, monaco) => {
+    editorRef.current  = editor;
+    monacoRef.current  = monaco;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter,        () => onRunRef.current());
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => onSubmitRef.current());
+
+    // Enable built-in JS/TS syntax + semantic validation
+    if (language.monacoLang === 'javascript' || language.monacoLang === 'typescript') {
+      monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({ noSemanticValidation: false, noSyntaxValidation: false });
+      monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({ noSemanticValidation: false, noSyntaxValidation: false });
+    }
   };
+
+  // Re-apply JS diagnostics when language changes; clear markers for other langs
+  useEffect(() => {
+    if (!monacoRef.current) return;
+    const mc = monacoRef.current;
+    if (language.monacoLang === 'javascript' || language.monacoLang === 'typescript') {
+      mc.languages.typescript.javascriptDefaults.setDiagnosticsOptions({ noSemanticValidation: false, noSyntaxValidation: false });
+    }
+    const model = editorRef.current?.getModel();
+    if (model) {
+      mc.editor.setModelMarkers(model, 'judge0', []);
+      mc.editor.setModelMarkers(model, 'live-lint', []);
+    }
+  }, [language]);
+
+  // Set Monaco error markers from Judge0 output whenever errorOutput changes
+  useEffect(() => {
+    if (!editorRef.current || !monacoRef.current) return;
+    const model = editorRef.current.getModel();
+    if (!model) return;
+    const markers = verdictData.errorOutput
+      ? parseJudge0Markers(verdictData.errorOutput, language.name)
+      : [];
+    monacoRef.current.editor.setModelMarkers(model, 'judge0', markers);
+  }, [verdictData.errorOutput, language.name]);
 
   // ── Shared verdict handler ───────────────────────────────────────────────────
   const handleVerdictData = useCallback((jobResult: any, isCustomRun: boolean) => {
@@ -230,18 +384,22 @@ export default function ProblemSolvingPage() {
       return;
     }
 
-    setProgress({ current: TOTAL_TESTS, total: TOTAL_TESTS });
+    setProgress({ current: totalTests, total: totalTests });
     const verdictDesc = jobResult.verdict?.description || 'Error';
     const isOI = jobResult.scoring_mode === 'oi';
     const ws: WorkspaceStatus =
       verdictDesc === 'Accepted' ? 'accepted' :
       verdictDesc === 'Partial'  ? 'wrong'    :
-      verdictDesc === 'Wrong Answer' ? 'wrong' :
       verdictDesc === 'Error'    ? 'error'     : 'wrong';
     setStatus(ws);
 
+    // Auto-show console for compile/runtime errors so the trace is immediately visible
+    const isCE = verdictDesc === 'Compilation Error';
+    const isRE = verdictDesc?.includes('Runtime Error') || verdictDesc === 'Runtime Error (NZEC)' || verdictDesc === 'Runtime Error (SIGSEGV)' || verdictDesc === 'Runtime Error (SIGFPE)';
+    if (isCE || isRE) setActiveOutputTab('console');
+
     const passedCount = jobResult.passed_count ?? jobResult.test_case_results?.filter((r: any) => r.status?.id === 3).length ?? 0;
-    const totalCount  = jobResult.total_count  ?? jobResult.test_case_results?.length ?? TOTAL_TESTS;
+    const totalCount  = jobResult.total_count  ?? jobResult.test_case_results?.length ?? totalTests;
 
     // First failing test result (drives both the failed-test hint and explain-error).
     const results = jobResult.test_case_results || [];
@@ -281,13 +439,10 @@ export default function ProblemSolvingPage() {
         runtime: jobResult.time ? `${Math.floor(jobResult.time * 1000)} ms` : '—',
         created_at: new Date().toISOString(),
       }, ...prev.slice(0, 9)]);
-      // Unlock + auto-open the AI code review for the accepted solution.
       setSolved(true);
       setReviewKey(k => k + 1);
-      setLeftTab('review');
-      celebrate();
     }
-  }, [language]);
+  }, [language, totalTests]);
 
   // ── Submit / Run ─────────────────────────────────────────────────────────────
   const executeCode = useCallback(async (isSubmit: boolean) => {
@@ -300,20 +455,29 @@ export default function ProblemSolvingPage() {
 
     setStatus('judging');
     setRetryMsg(null);
+    setJudgeError(null);
     setDrawerOpen(true);
-    setProgress({ current: 0, total: TOTAL_TESTS });
+    setActiveOutputTab('cases');
+    setProgress({ current: 0, total: totalTests });
     setVerdictData({});
     setExplainData(null);
+
+    // Clear stale error markers from the previous run
+    if (editorRef.current && monacoRef.current) {
+      const model = editorRef.current.getModel();
+      if (model) monacoRef.current.editor.setModelMarkers(model, 'judge0', []);
+    }
 
     let animId: ReturnType<typeof setInterval>;
     let n = 0;
     animId = setInterval(() => {
-      n = Math.min(n + 1, TOTAL_TESTS - 1);
-      setProgress({ current: n, total: TOTAL_TESTS });
+      n = Math.min(n + 1, totalTests - 1);
+      setProgress({ current: n, total: totalTests });
     }, 200);
 
     const timeoutId = setTimeout(() => {
       clearInterval(animId);
+      setJudgeError('Execution timed out. The judge might be offline.');
       setStatus('error');
     }, 30000);
 
@@ -364,15 +528,17 @@ export default function ProblemSolvingPage() {
         if (data?.state === 'completed' && data?.result) {
           handleVerdictData(data.result, false);
         } else {
+          setJudgeError(data?.error || 'Execution failed on the judge server.');
           setStatus('error');
         }
       });
-    } catch {
+    } catch (err: any) {
       clearInterval(animId);
       clearTimeout(timeoutId);
+      setJudgeError(err?.response?.data?.error || err.message);
       setStatus('error');
     }
-  }, [id, language, code, handleVerdictData]);
+  }, [id, language, code, handleVerdictData, totalTests, assignmentId, contestId]);
 
   const handleRun    = useCallback(() => executeCode(false), [executeCode]);
   const handleSubmit = useCallback(() => executeCode(true),  [executeCode]);
@@ -391,8 +557,12 @@ export default function ProblemSolvingPage() {
     setDrawerOpen(true);
     setActiveOutputTab('console');
     setVerdictData({});
+    setJudgeError(null);
 
-    const timeoutId = setTimeout(() => setStatus('error'), 30000);
+    const timeoutId = setTimeout(() => {
+      setJudgeError('Execution timed out. The judge might be offline.');
+      setStatus('error');
+    }, 30000);
 
     try {
       const submitRes = await api.post('/api/submit', {
@@ -412,11 +582,13 @@ export default function ProblemSolvingPage() {
         if (data?.state === 'completed' && data?.result) {
           handleVerdictData(data.result, true);
         } else {
+          setJudgeError(data?.error || 'Execution failed on the judge server.');
           setStatus('error');
         }
       });
-    } catch {
+    } catch (err: any) {
       clearTimeout(timeoutId);
+      setJudgeError(err?.response?.data?.error || err.message);
       setStatus('error');
     }
   }, [id, language, code, customInput, handleVerdictData]);
@@ -502,97 +674,91 @@ export default function ProblemSolvingPage() {
       )}
 
       {/* ── Top bar ─────────────────────────────────────────────────────────── */}
-      <div className="h-12 bg-card border-b border-border flex items-center px-4 gap-3 flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="w-5 h-5 bg-brand flex items-center justify-center flex-shrink-0">
-            <Code className="w-3 h-3 text-white" />
+      <div className="h-12 bg-card border-b border-border flex items-center px-3 gap-2 flex-shrink-0">
+        {/* Logo */}
+        <div className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity flex-shrink-0" onClick={() => navigate('/')}>
+          <div className="w-6 h-6 bg-brand flex items-center justify-center flex-shrink-0">
+            <Code className="w-3.5 h-3.5 text-white" />
           </div>
-          <span className="text-foreground text-sm font-medium hidden sm:inline">CodeMentor</span>
+          <span className="text-foreground text-sm font-semibold hidden lg:inline">CodeMentor</span>
         </div>
 
-        <div className="h-4 w-px bg-border" />
+        <div className="h-4 w-px bg-border flex-shrink-0" />
 
-        <button
-          onClick={() => navigate('/app/problems')}
-          className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground text-sm transition-colors px-1"
-        >
-          <List className="w-4 h-4" />
-          <span className="hidden sm:inline">Problem List</span>
-        </button>
-
-        <div className="flex items-center border border-border divide-x divide-border overflow-hidden">
+        {/* Problem nav */}
+        <div className="flex items-center gap-0.5 flex-shrink-0">
           <button
-            onClick={() => adjacent.prev && navigate(`/app/problems/${adjacent.prev}`)}
+            onClick={() => setShowProblemList(true)}
+            className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground text-xs transition-colors px-2 py-1.5 rounded-md hover:bg-secondary"
+          >
+            <List className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Problem List</span>
+          </button>
+          <button
             disabled={!adjacent.prev}
-            className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            onClick={() => adjacent.prev && navigate(`/app/problems/${adjacent.prev}`)}
+            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 transition-colors"
             title="Previous problem"
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
           <button
-            onClick={() => adjacent.next && navigate(`/app/problems/${adjacent.next}`)}
             disabled={!adjacent.next}
-            className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            onClick={() => adjacent.next && navigate(`/app/problems/${adjacent.next}`)}
+            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary disabled:opacity-30 transition-colors"
             title="Next problem"
           >
             <ChevronRight className="w-4 h-4" />
           </button>
         </div>
-        {adjacent.total > 0 && (
-          <span className="text-muted-foreground text-xs font-mono">{adjacent.position}/{adjacent.total}</span>
-        )}
 
-        <div className="flex items-center gap-2 ml-1 min-w-0">
-          {loading ? (
-            <span className="text-muted-foreground text-sm animate-pulse">Loading…</span>
-          ) : (
-            <>
-              <span className="text-foreground text-sm truncate">{problem?.title || `Problem ${id}`}</span>
-              {problem?.difficulty && (
-                <span
-                  className="inline-flex items-center px-2 py-0.5 text-[10px] font-semibold flex-shrink-0 border"
-                  style={{ color: difficultyColor(problem.difficulty), borderColor: `${difficultyColor(problem.difficulty)}40`, backgroundColor: `${difficultyColor(problem.difficulty)}12` }}
-                >
-                  {problem.difficulty}
-                </span>
-              )}
-            </>
-          )}
+        {/* Spacer */}
+        <div className="flex-1 min-w-0" />
+
+        {/* Run + Submit — center of nav */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            onClick={handleRun}
+            disabled={isJudging || loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-secondary border border-border text-foreground text-sm font-medium hover:bg-secondary/80 hover:border-muted-foreground transition-colors disabled:opacity-50 rounded-md"
+          >
+            <Play className="w-3.5 h-3.5" />
+            Run
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={isJudging || loading}
+            className="flex items-center gap-1.5 px-4 py-1.5 bg-success text-white text-sm font-semibold hover:bg-green-600 transition-colors disabled:opacity-50 rounded-md"
+          >
+            {isJudging
+              ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Judging…</>
+              : 'Submit'
+            }
+          </button>
         </div>
 
-        <div className="ml-auto flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-background border border-border text-muted-foreground text-sm font-mono cursor-default">
-            <Timer className="w-3.5 h-3.5 text-brand" />
-            <span>
-              {String(Math.floor(timeElapsed / 60)).padStart(2, '0')}:{String(timeElapsed % 60).padStart(2, '0')}
-            </span>
-          </div>
+        {/* Spacer */}
+        <div className="flex-1 min-w-0" />
 
+        {/* Right controls */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-muted-foreground text-sm font-mono select-none">
+            <Timer className="w-3.5 h-3.5" />
+            <span>{String(Math.floor(timeElapsed / 60)).padStart(2, '0')}:{String(timeElapsed % 60).padStart(2, '0')}</span>
+          </div>
           <button
             onClick={() => setShowAI(!showAI)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-sm border transition-colors ${
-              showAI ? 'bg-purple/10 border-purple/50 text-purple' : 'border-border text-muted-foreground hover:text-foreground'
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-md transition-colors ${
+              showAI ? 'bg-purple/15 text-purple' : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
             }`}
           >
             <Bot className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">AI Tutor</span>
+            <span className="hidden sm:inline text-xs">AI Tutor</span>
           </button>
         </div>
       </div>
 
-      {/* ── Verdict banner ───────────────────────────────────────────────────── */}
-      <VerdictBanner
-        status={status}
-        failingTest={verdictData.failingTest}
-        runtimeMs={verdictData.runtimeMs}
-        memoryMB={verdictData.memoryMB}
-        testsPassed={verdictData.testsPassed}
-        testsTotal={verdictData.testsTotal}
-        onNext={() => { setStatus('idle'); adjacent.next && navigate(`/app/problems/${adjacent.next}`); }}
-        onAskTutor={() => { setShowAI(true); setTutorContext(`failing-test-${Date.now()}`); }}
-        onRetry={handleSubmit}
-        onDismiss={() => setStatus('idle')}
-      />
+{/* Floating banner removed — verdict is shown inline in the output drawer */}
 
       {/* ── Workspace ────────────────────────────────────────────────────────── */}
       <div className="flex-1 flex overflow-hidden">
@@ -602,32 +768,22 @@ export default function ProblemSolvingPage() {
           <ResizablePanel defaultSize={40} minSize={24} className="overflow-hidden">
             <div className="h-full bg-background text-foreground flex flex-col">
               <TabsPrimitive.Root value={leftTab} onValueChange={setLeftTab} className="h-full flex flex-col">
-                <TabsPrimitive.List className="flex border-b border-border px-2 gap-1 flex-shrink-0">
-                  {[
-                    { value: 'description', label: 'Description', icon: FileText },
-                    { value: 'submissions', label: 'Submissions', icon: CheckCircle2 },
-                    { value: 'ai',          label: 'AI Tutor',    icon: Bot },
-                    ...(solved
-                      ? [{ value: 'review', label: 'Review', icon: Sparkles },
-                         { value: 'community', label: 'Community', icon: Users }]
-                      : []),
-                    { value: 'discussion',  label: 'Discussion',  icon: MessageSquare },
-                    ...(problem?.editorial_unlocked
-                      ? [{ value: 'editorial', label: 'Editorial', icon: BookOpen }]
-                      : []),
-                  ].map(tab => {
-                    const Icon = tab.icon;
-                    return (
-                      <TabsPrimitive.Trigger
-                        key={tab.value}
-                        value={tab.value}
-                        className="flex items-center gap-1.5 py-3 px-3 border-b-2 border-transparent data-[state=active]:border-brand text-muted-foreground data-[state=active]:text-foreground transition-colors font-medium text-sm outline-none"
-                      >
-                        <Icon className="w-3.5 h-3.5" />
-                        {tab.label}
-                      </TabsPrimitive.Trigger>
-                    );
-                  })}
+                <TabsPrimitive.List className="flex border-b border-border px-2 gap-0 flex-shrink-0 overflow-x-auto">
+                  {([
+                    { value: 'description', label: 'Description' },
+                    { value: 'submissions', label: 'Submissions' },
+                    ...(solved ? [{ value: 'review', label: 'Review' }] : []),
+                    ...(solved ? [{ value: 'community', label: 'Solutions' }] : []),
+                    ...(problem?.editorial_unlocked ? [{ value: 'editorial', label: 'Editorial' }] : []),
+                  ] as { value: string; label: string }[]).map(tab => (
+                    <TabsPrimitive.Trigger
+                      key={tab.value}
+                      value={tab.value}
+                      className="py-3 px-3 border-b-2 border-transparent data-[state=active]:border-brand text-muted-foreground data-[state=active]:text-foreground transition-colors text-sm font-medium outline-none whitespace-nowrap"
+                    >
+                      {tab.label}
+                    </TabsPrimitive.Trigger>
+                  ))}
                 </TabsPrimitive.List>
 
                 {/* DESCRIPTION */}
@@ -850,10 +1006,10 @@ export default function ProblemSolvingPage() {
 
               {/* Editor */}
               <ResizablePanel defaultSize={drawerOpen ? 64 : 100} minSize={30} className="overflow-hidden">
-                <div className="h-full flex flex-col bg-white dark:bg-[#1E1E1E]">
+                <div className="h-full flex flex-col bg-white dark:bg-[#1e1e1e]">
                   {/* Editor toolbar */}
-                  <div className="flex items-center justify-between px-3 py-2 bg-background border-b border-border gap-2">
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-between px-3 py-1.5 bg-card border-b border-border gap-2">
+                    <div className="flex items-center gap-1.5">
                       {/* Language Select */}
                       <SelectPrimitive.Root
                         value={language.name}
@@ -865,7 +1021,7 @@ export default function ProblemSolvingPage() {
                           setCode(saved ?? stub ?? lang.defaultCode);
                         }}
                       >
-                        <SelectPrimitive.Trigger className="flex items-center justify-between gap-2 px-3 py-1.5 bg-card border border-border hover:border-muted-foreground transition-colors min-w-[120px] text-sm text-foreground outline-none">
+                        <SelectPrimitive.Trigger className="flex items-center justify-between gap-1.5 px-2.5 py-1 bg-secondary border border-border hover:border-muted-foreground transition-colors min-w-[110px] text-sm text-foreground outline-none rounded-md">
                           <SelectPrimitive.Value />
                           <ChevronDown className="w-4 h-4 text-muted-foreground" />
                         </SelectPrimitive.Trigger>
@@ -885,7 +1041,7 @@ export default function ProblemSolvingPage() {
                       {/* Settings */}
                       <Popover>
                         <PopoverTrigger asChild>
-                          <button className="p-1.5 border border-border bg-card text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">
+                          <button className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors" title="Editor settings">
                             <Settings className="w-3.5 h-3.5" />
                           </button>
                         </PopoverTrigger>
@@ -919,7 +1075,7 @@ export default function ProblemSolvingPage() {
                       {/* Reset */}
                       <Popover open={confirmReset} onOpenChange={setConfirmReset}>
                         <PopoverTrigger asChild>
-                          <button className="p-1.5 border border-border bg-card text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors">
+                          <button className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors" title="Reset to starter code">
                             <RotateCcw className="w-3.5 h-3.5" />
                           </button>
                         </PopoverTrigger>
@@ -944,30 +1100,14 @@ export default function ProblemSolvingPage() {
                             }
                           }
                         }}
-                        className="p-1.5 border border-border bg-card text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors ml-2"
+                        className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                         title="Toggle Fullscreen"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
                       </button>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={handleRun}
-                        disabled={isJudging}
-                        className="flex items-center gap-2 px-4 py-1.5 border border-border bg-card text-foreground text-sm font-medium hover:bg-secondary hover:border-muted-foreground transition-colors disabled:opacity-50"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                        Run
-                      </button>
-                      <button
-                        onClick={handleSubmit}
-                        disabled={isJudging}
-                        className="flex items-center gap-2 px-4 py-1.5 bg-success text-white text-sm font-semibold hover:bg-[#16A34A] transition-colors disabled:opacity-50"
-                      >
-                        {isJudging ? 'Judging…' : 'Submit'}
-                      </button>
-                    </div>
+                    {/* Run/Submit moved to top navbar */}
                   </div>
 
                   {/* Monaco editor */}
@@ -981,7 +1121,8 @@ export default function ProblemSolvingPage() {
                       theme={editorTheme}
                       options={{
                         fontSize,
-                        fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                        fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace',
+                        fontLigatures: true,
                         lineNumbers: 'on',
                         minimap: { enabled: false },
                         scrollBeyondLastLine: false,
@@ -989,6 +1130,13 @@ export default function ProblemSolvingPage() {
                         tabSize: 4,
                         wordWrap: 'on',
                         cursorStyle: vimMode ? 'block' : 'line',
+                        smoothScrolling: true,
+                        cursorSmoothCaretAnimation: 'on',
+                        renderLineHighlight: 'line',
+                        overviewRulerBorder: false,
+                        hideCursorInOverviewRuler: true,
+                        scrollbar: { verticalScrollbarSize: 6, horizontalScrollbarSize: 6 },
+                        padding: { top: 12, bottom: 12 },
                       }}
                     />
                   </div>
@@ -1001,10 +1149,102 @@ export default function ProblemSolvingPage() {
                   <ResizableHandle className="bg-border h-px hover:bg-brand data-[resize-handle-state=drag]:bg-brand transition-colors" />
                   <ResizablePanel defaultSize={36} minSize={14} className="overflow-hidden">
                     <div className="h-full bg-background flex flex-col">
-                      <TabsPrimitive.Root value={activeOutputTab} onValueChange={setActiveOutputTab} className="h-full flex flex-col">
-                        <div className="flex items-center border-b border-border pr-2">
-                          <TabsPrimitive.List className="flex px-3 gap-4 flex-1">
-                            {[{ v: 'cases', l: 'Test Cases' }, { v: 'console', l: 'Console' }, { v: 'custom', l: 'Custom Input' }].map(t => (
+                      {/* ── Inline verdict strip ─────────────────────────────── */}
+                      {!isJudging && status !== 'idle' && (() => {
+                        const label = verdictData.verdictLabel || '';
+                        const isCE  = label === 'Compilation Error';
+                        const isRE  = label.includes('Runtime Error');
+                        const isTLE = label === 'Time Limit Exceeded';
+                        const isMLE = label === 'Memory Limit Exceeded';
+                        const isExecError = isCE || isRE || isTLE || isMLE;
+                        // Color: accepted=green, WA=red, CE/RE/TLE/MLE=orange, network-error=orange, ran=neutral
+                        const colorClass =
+                          status === 'accepted' ? 'border-success/25 bg-success/8'   :
+                          status === 'error'    ? 'border-warning/25 bg-warning/8'   :
+                          status === 'ran'      ? 'border-border bg-card/60'          :
+                          isExecError          ? 'border-warning/25 bg-warning/8'   :
+                          'border-destructive/25 bg-destructive/8';
+                        const textClass =
+                          status === 'accepted' ? 'text-success'     :
+                          (status === 'error' || isExecError) ? 'text-warning' :
+                          status === 'ran'      ? 'text-foreground'  :
+                          'text-destructive';
+                        const Icon =
+                          status === 'accepted'          ? CheckCircle2 :
+                          (status === 'error' || isExecError) ? WifiOff  :
+                          status === 'ran'               ? CheckCircle2  :
+                          XCircle;
+                        const displayLabel =
+                          status === 'accepted' ? 'Accepted'                                      :
+                          status === 'error'    ? 'Error'                                          :
+                          status === 'ran'      ? 'Finished'                                       :
+                          (label || 'Wrong Answer');
+
+                        return (
+                          <div className={`flex items-center gap-2.5 px-4 py-2 border-b text-sm flex-shrink-0 ${colorClass}`}>
+                            <Icon className={`w-4 h-4 flex-shrink-0 ${textClass}`} />
+                            <span className={`font-semibold ${textClass}`}>{displayLabel}</span>
+
+                            {/* Pass/fail count — not shown for CE/RE (no test cases ran) */}
+                            {(status === 'accepted' || (status === 'wrong' && !isExecError)) && verdictData.testsPassed != null && (
+                              <span className="text-muted-foreground text-xs">
+                                {verdictData.testsPassed}/{verdictData.testsTotal} test cases
+                                {status === 'accepted' && verdictData.runtimeMs
+                                  ? ` · ${verdictData.runtimeMs} ms · ${verdictData.memoryMB ?? '?'} MB`
+                                  : ''}
+                              </span>
+                            )}
+
+                            {/* For CE/RE: hint that error details are in console */}
+                            {isExecError && (
+                              <span className="text-muted-foreground text-xs">
+                                {isCE ? 'See compile output below' : isRE ? 'See runtime trace below' : ''}
+                              </span>
+                            )}
+
+                            {/* Network error message */}
+                            {status === 'error' && judgeError && (
+                              <span className="text-muted-foreground text-xs truncate max-w-[280px]">{judgeError}</span>
+                            )}
+
+                            <div className="flex items-center gap-1.5 ml-auto flex-shrink-0">
+                              {status === 'wrong' && !isExecError && (
+                                <button
+                                  onClick={() => { setShowAI(true); setTutorContext(`failing-test-${Date.now()}`); }}
+                                  className="flex items-center gap-1 text-xs text-purple hover:underline"
+                                >
+                                  <Bot className="w-3 h-3" /> Ask AI
+                                </button>
+                              )}
+                              {status === 'error' && (
+                                <button onClick={handleSubmit} className="flex items-center gap-1 text-xs border border-border px-2 py-0.5 rounded-md text-muted-foreground hover:text-foreground">
+                                  <RefreshCw className="w-3 h-3" /> Retry
+                                </button>
+                              )}
+                              {status === 'accepted' && adjacent.next && (
+                                <button
+                                  onClick={() => { setStatus('idle'); navigate(`/app/problems/${adjacent.next!}`); }}
+                                  className="flex items-center gap-1 text-xs text-success hover:underline font-medium"
+                                >
+                                  Next <ArrowRight className="w-3 h-3" />
+                                </button>
+                              )}
+                              <button onClick={() => setStatus('idle')} className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors">
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      <TabsPrimitive.Root value={activeOutputTab} onValueChange={setActiveOutputTab} className="flex-1 flex flex-col min-h-0">
+                        <div className="flex items-center border-b border-border pr-2 bg-card/50 flex-shrink-0">
+                          <TabsPrimitive.List className="flex px-4 gap-5 flex-1">
+                            {[
+                              { v: 'cases',   l: 'Testcase'     },
+                              { v: 'console', l: 'Test Result'  },
+                              { v: 'custom',  l: 'Custom Input' },
+                            ].map(t => (
                               <TabsPrimitive.Trigger
                                 key={t.v}
                                 value={t.v}
@@ -1014,13 +1254,13 @@ export default function ProblemSolvingPage() {
                               </TabsPrimitive.Trigger>
                             ))}
                           </TabsPrimitive.List>
-                          <button onClick={() => setDrawerOpen(false)} className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-card transition-colors">
+                          <button onClick={() => setDrawerOpen(false)} className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors mr-1">
                             <ChevronDown className="w-4 h-4" />
                           </button>
                         </div>
 
                         {/* TEST CASES */}
-                        <TabsPrimitive.Content value="cases" className="flex-1 overflow-auto p-4 outline-none">
+                        <TabsPrimitive.Content value="cases" className="flex-1 overflow-auto p-5 outline-none bg-background">
                           {isJudging ? (
                             <JudgingSkeleton progress={progress} retryMsg={retryMsg} />
                           ) : (
@@ -1059,17 +1299,17 @@ export default function ProblemSolvingPage() {
                         </TabsPrimitive.Content>
 
                         {/* CONSOLE */}
-                        <TabsPrimitive.Content value="console" className="flex-1 overflow-auto p-4 font-['JetBrains_Mono'] text-sm outline-none">
+                        <TabsPrimitive.Content value="console" className="flex-1 overflow-auto p-5 font-['JetBrains_Mono'] text-sm outline-none bg-[#0a0a0a] dark:bg-[#0a0a0a] text-gray-300">
                           {isJudging ? <JudgingSkeleton progress={progress} retryMsg={retryMsg} /> :
                            drawerStatus === 'success' ? (
-                            <div className="space-y-3">
-                              <div className="text-success">stdout</div>
-                              <div className="text-foreground whitespace-pre-wrap">{verdictData.consoleOutput || '(no output)'}</div>
+                            <div className="space-y-4">
+                              <div className="text-success font-semibold text-xs tracking-wider uppercase">stdout</div>
+                              <div className="text-gray-100 whitespace-pre-wrap bg-white/5 p-4 rounded-md border border-white/10">{verdictData.consoleOutput || '(no output)'}</div>
 
                               {verdictData.errorOutput && (
-                                <div className="mt-3 pt-3 border-t border-border space-y-2">
-                                  <div className="text-destructive">stderr / error</div>
-                                  <div className="text-destructive whitespace-pre-wrap text-xs bg-destructive/5 border border-destructive/20 p-2">{verdictData.errorOutput}</div>
+                                <div className="mt-4 pt-4 border-t border-white/10 space-y-3">
+                                  <div className="text-destructive font-semibold text-xs tracking-wider uppercase">stderr / error</div>
+                                  <div className="text-destructive whitespace-pre-wrap text-sm bg-destructive/10 border border-destructive/20 p-4 rounded-md">{verdictData.errorOutput}</div>
                                   <button
                                     onClick={handleExplainError}
                                     disabled={explainLoading}
@@ -1087,29 +1327,29 @@ export default function ProblemSolvingPage() {
 
                               {(verdictData.runtimeMs || verdictData.memoryMB || verdictData.score != null) && (
                                 <div className="mt-4 pt-4 border-t border-border flex items-center gap-6 font-['Inter'] flex-wrap">
-                                  {verdictData.runtimeMs && <span className="flex items-center gap-2 text-muted-foreground"><Timer className="w-4 h-4" /> Runtime <span className="text-foreground font-mono">{verdictData.runtimeMs} ms</span></span>}
-                                  {verdictData.memoryMB  && <span className="flex items-center gap-2 text-muted-foreground"><Cpu   className="w-4 h-4" /> Memory  <span className="text-foreground font-mono">{verdictData.memoryMB} MB</span></span>}
+                                  {verdictData.runtimeMs && <span className="flex items-center gap-2 text-gray-400"><Timer className="w-4 h-4" /> Runtime <span className="text-gray-100 font-mono">{verdictData.runtimeMs} ms</span></span>}
+                                  {verdictData.memoryMB  && <span className="flex items-center gap-2 text-gray-400"><Cpu   className="w-4 h-4" /> Memory  <span className="text-gray-100 font-mono">{verdictData.memoryMB} MB</span></span>}
                                   {verdictData.score != null && (
-                                    <span className="flex items-center gap-2 text-muted-foreground">
+                                    <span className="flex items-center gap-2 text-gray-400">
                                       Score{' '}
                                       <span className={`font-mono font-bold ${verdictData.score === verdictData.maxScore ? 'text-success' : 'text-warning'}`}>
                                         {verdictData.score}/{verdictData.maxScore}
                                       </span>
-                                      <span className="text-xs text-muted-foreground">pts</span>
+                                      <span className="text-xs text-gray-500">pts</span>
                                     </span>
                                   )}
                                 </div>
                               )}
                             </div>
-                          ) : <div className="text-muted-foreground font-['Inter']">Run your code to see stdout / stderr here.</div>}
+                          ) : <div className="text-gray-500 font-['Inter'] text-center py-10">Run your code to see stdout / stderr here.</div>}
                         </TabsPrimitive.Content>
 
                         {/* CUSTOM INPUT */}
-                        <TabsPrimitive.Content value="custom" className="flex-1 overflow-auto p-4 outline-none flex flex-col gap-3">
+                        <TabsPrimitive.Content value="custom" className="flex-1 overflow-auto p-5 outline-none flex flex-col gap-4 bg-background">
                           <textarea
                             value={customInput}
                             onChange={e => setCustomInput(e.target.value)}
-                            className="w-full flex-1 min-h-[80px] bg-card text-foreground border border-border p-3 font-['JetBrains_Mono'] text-sm resize-none outline-none focus:border-brand transition-colors placeholder-muted-foreground"
+                            className="w-full flex-1 min-h-[120px] bg-card text-foreground border border-border p-4 rounded-md font-['JetBrains_Mono'] text-sm resize-none outline-none focus:border-brand transition-colors placeholder-muted-foreground shadow-sm"
                             placeholder="Enter custom stdin input…"
                           />
                           <button
@@ -1152,6 +1392,17 @@ export default function ProblemSolvingPage() {
             failingTest={verdictData.failingTest}
           />
         )}
+        
+        {showProblemList && (
+          <ProblemListPanel
+            currentProblemId={id}
+            onClose={() => setShowProblemList(false)}
+            onSelect={(pid) => {
+              setShowProblemList(false);
+              navigate(`/app/problems/${pid}`);
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -1159,9 +1410,9 @@ export default function ProblemSolvingPage() {
 
 function Field({ label, value, tone = 'text-foreground' }: { label: string; value: string; tone?: string }) {
   return (
-    <div className="bg-card border border-border p-3">
-      <div className="text-muted-foreground mb-1 text-xs">{label}</div>
-      <div className={`font-['JetBrains_Mono'] ${tone}`}>{value}</div>
+    <div className="bg-card/50 border border-border p-4 rounded-md">
+      <div className="text-muted-foreground mb-1.5 text-xs font-semibold uppercase tracking-wider">{label}</div>
+      <div className={`font-['JetBrains_Mono'] text-sm ${tone}`}>{value}</div>
     </div>
   );
 }
