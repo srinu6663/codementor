@@ -1,0 +1,1126 @@
+"use client";
+
+import * as React from "react";
+import NextLink from "next/link";
+import dynamic from "next/dynamic";
+import { useParams, useRouter } from "next/navigation";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import Box from "@mui/material/Box";
+import Stack from "@mui/material/Stack";
+import Typography from "@mui/material/Typography";
+import IconButton from "@mui/material/IconButton";
+import Button from "@mui/material/Button";
+import Tooltip from "@mui/material/Tooltip";
+import Tabs from "@mui/material/Tabs";
+import Tab from "@mui/material/Tab";
+import Select from "@mui/material/Select";
+import MenuItem from "@mui/material/MenuItem";
+import Chip from "@mui/material/Chip";
+import Skeleton from "@mui/material/Skeleton";
+import Divider from "@mui/material/Divider";
+import CircularProgress from "@mui/material/CircularProgress";
+import Collapse from "@mui/material/Collapse";
+import Avatar from "@mui/material/Avatar";
+import Menu from "@mui/material/Menu";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import { useTheme } from "@mui/material/styles";
+import useMediaQuery from "@mui/material/useMediaQuery";
+import CodeIcon from "@mui/icons-material/Code";
+import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import PlayArrowOutlinedIcon from "@mui/icons-material/PlayArrowOutlined";
+import UploadOutlinedIcon from "@mui/icons-material/UploadOutlined";
+import RestartAltOutlinedIcon from "@mui/icons-material/RestartAltOutlined";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
+import CancelOutlinedIcon from "@mui/icons-material/CancelOutlined";
+import TimerOutlinedIcon from "@mui/icons-material/TimerOutlined";
+import LogoutIcon from "@mui/icons-material/Logout";
+import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
+import api from "@/lib/api";
+import { createSocket, joinRoom, leaveRoom } from "@/lib/socket";
+import { clearSession, getUser } from "@/lib/auth";
+import { DifficultyChip } from "@/components/ui/DifficultyChip";
+import { VerdictChip } from "@/components/ui/VerdictChip";
+import { ErrorState } from "@/components/ui/States";
+import type {
+  ProblemDetail,
+  AdjacentProblems,
+  VerdictPayload,
+  VerdictResult,
+  ProblemHistoryEntry,
+} from "@/lib/types";
+
+// ── Monaco editor (client-only) ───────────────────────────────────────────────
+
+const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
+  ssr: false,
+  loading: () => (
+    <Box sx={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "background.default" }}>
+      <CircularProgress size={32} />
+    </Box>
+  ),
+});
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const LANGUAGES = [
+  { id: 71, name: "Python 3", monaco: "python" },
+  { id: 62, name: "Java",     monaco: "java" },
+  { id: 54, name: "C++",      monaco: "cpp" },
+  { id: 63, name: "JavaScript", monaco: "javascript" },
+] as const;
+
+type LangId = (typeof LANGUAGES)[number]["id"];
+
+const LS_LANG   = "cm:lang";
+const lsCode    = (pid: string, lid: number) => `cm:code:${pid}:${lid}`;
+const lsTimer   = (pid: string) => `cm:timer:${pid}`;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function formatTimer(secs: number): string {
+  const m = Math.floor(secs / 60).toString().padStart(2, "0");
+  const s = (secs % 60).toString().padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+function formatMs(secs: number): string {
+  return secs < 1 ? `${Math.round(secs * 1000)} ms` : `${secs.toFixed(2)} s`;
+}
+
+function formatKb(kb: number): string {
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+}
+
+function verdictBg(desc: string): { bg: string; fg: string } {
+  if (desc === "Accepted") return { bg: "successContainer", fg: "onSuccessContainer" };
+  if (desc === "Wrong Answer") return { bg: "errorContainer", fg: "onErrorContainer" };
+  if (desc?.startsWith("Runtime")) return { bg: "errorContainer", fg: "onErrorContainer" };
+  return { bg: "warningContainer", fg: "onWarningContainer" };
+}
+
+function initials(name?: string) {
+  if (!name) return "?";
+  return name.split(" ").filter(Boolean).slice(0, 2).map((p) => p[0]?.toUpperCase()).join("");
+}
+
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+
+function ProblemMarkdown({ content }: { content: string }) {
+  return (
+    <Box
+      sx={{
+        "& p": { mb: 1.5, lineHeight: 1.7 },
+        "& ul, & ol": { pl: 3, mb: 1.5 },
+        "& li": { mb: 0.5 },
+        "& code": {
+          fontFamily: "monospace",
+          fontSize: "0.85em",
+          bgcolor: "surfaceContainerHigh",
+          color: "onSurface",
+          px: 0.75,
+          py: 0.25,
+          borderRadius: 1,
+        },
+        "& pre": {
+          bgcolor: "surfaceContainerHighest",
+          borderRadius: 2,
+          p: 2,
+          overflow: "auto",
+          mb: 1.5,
+          "& code": { bgcolor: "transparent", px: 0, py: 0 },
+        },
+        "& table": { width: "100%", borderCollapse: "collapse", mb: 1.5 },
+        "& th, & td": { border: "1px solid", borderColor: "outlineVariant", px: 1.5, py: 0.75 },
+        "& th": { bgcolor: "surfaceContainerHigh", fontWeight: 600 },
+        "& blockquote": { borderLeft: "3px solid", borderColor: "primary.main", pl: 2, my: 1.5, color: "text.secondary" },
+        "& strong": { fontWeight: 600 },
+        "& h1, & h2, & h3": { mt: 2, mb: 1, fontWeight: 600 },
+      }}
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </Box>
+  );
+}
+
+// ── Test case result row ──────────────────────────────────────────────────────
+
+function TestCaseRow({
+  index,
+  result,
+}: {
+  index: number;
+  result: VerdictResult["test_case_results"][number];
+}) {
+  const [open, setOpen] = React.useState(index === 0);
+  const passed = result.passed;
+
+  return (
+    <Box sx={{ border: "1px solid", borderColor: passed ? "successContainer" : "errorContainer", borderRadius: 2, overflow: "hidden" }}>
+      <Box
+        component="button"
+        onClick={() => setOpen((v) => !v)}
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          width: "100%",
+          px: 1.5,
+          py: 1,
+          bgcolor: passed ? "successContainer" : "errorContainer",
+          color: passed ? "onSuccessContainer" : "onErrorContainer",
+          border: "none",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        <Stack direction="row" spacing={1} alignItems="center">
+          {passed ? (
+            <CheckCircleOutlineIcon sx={{ fontSize: 16 }} />
+          ) : (
+            <CancelOutlinedIcon sx={{ fontSize: 16 }} />
+          )}
+          <Typography variant="caption" fontWeight={600}>
+            Test case {index + 1} — {result.status.description}
+          </Typography>
+        </Stack>
+        <Stack direction="row" spacing={2} alignItems="center">
+          <Typography variant="caption" sx={{ opacity: 0.8 }}>
+            {formatMs(result.time)} · {formatKb(result.memory)}
+          </Typography>
+          {open ? <ExpandLessIcon sx={{ fontSize: 16 }} /> : <ExpandMoreIcon sx={{ fontSize: 16 }} />}
+        </Stack>
+      </Box>
+      <Collapse in={open}>
+        <Box sx={{ p: 1.5, bgcolor: "surfaceContainerLowest" }}>
+          {result.is_public && result.input != null && (
+            <TestIOBlock label="Input" value={result.input} />
+          )}
+          {result.is_public && result.expected != null && (
+            <TestIOBlock label="Expected" value={result.expected} />
+          )}
+          {result.stdout && (
+            <TestIOBlock label="Your output" value={result.stdout} highlight={!passed} />
+          )}
+          {(result.stderr || result.compile_output || result.message) && (
+            <TestIOBlock
+              label="Error"
+              value={result.compile_output || result.stderr || result.message}
+              isError
+            />
+          )}
+          {!result.is_public && (
+            <Typography variant="caption" color="text.secondary">
+              Hidden test case — input / expected output not shown.
+            </Typography>
+          )}
+        </Box>
+      </Collapse>
+    </Box>
+  );
+}
+
+function TestIOBlock({
+  label,
+  value,
+  highlight,
+  isError,
+}: {
+  label: string;
+  value: string;
+  highlight?: boolean;
+  isError?: boolean;
+}) {
+  return (
+    <Box sx={{ mb: 1.5 }}>
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+        {label}
+      </Typography>
+      <Box
+        component="pre"
+        sx={{
+          m: 0,
+          p: 1,
+          borderRadius: 1.5,
+          bgcolor: isError ? "errorContainer" : highlight ? "warningContainer" : "surfaceContainerHigh",
+          color: isError ? "onErrorContainer" : highlight ? "onWarningContainer" : "text.primary",
+          fontFamily: "monospace",
+          fontSize: "0.8rem",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-all",
+          maxHeight: 120,
+          overflow: "auto",
+        }}
+      >
+        {value || "(empty)"}
+      </Box>
+    </Box>
+  );
+}
+
+// ── IDE Top Header ────────────────────────────────────────────────────────────
+
+function IDEHeader({
+  problem,
+  adjacent,
+  adjacent2,
+  submitting,
+  running,
+  timerSecs,
+  onRun,
+  onSubmit,
+}: {
+  problem: ProblemDetail | null;
+  adjacent: AdjacentProblems | null;
+  adjacent2?: AdjacentProblems | null;
+  submitting: boolean;
+  running: boolean;
+  timerSecs: number;
+  onRun: () => void;
+  onSubmit: () => void;
+}) {
+  const router = useRouter();
+  const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
+  const user = React.useMemo(() => getUser(), []);
+
+  const handleSignOut = () => {
+    clearSession();
+    router.replace("/login");
+  };
+
+  return (
+    <Box
+      component="header"
+      sx={{
+        height: 52,
+        display: "flex",
+        alignItems: "center",
+        px: 1.5,
+        gap: 1,
+        borderBottom: "1px solid",
+        borderColor: "outlineVariant",
+        bgcolor: "surface",
+        flexShrink: 0,
+      }}
+    >
+      {/* Logo */}
+      <IconButton component={NextLink} href="/app/problems" aria-label="Back to problems" size="small">
+        <CodeIcon fontSize="small" />
+      </IconButton>
+
+      <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+
+      {/* Prev / Next */}
+      <Tooltip title="Previous problem">
+        <span>
+          <IconButton
+            component={NextLink}
+            href={adjacent?.prev ? `/app/problems/${adjacent.prev}` : "#"}
+            aria-label="Previous problem"
+            size="small"
+            disabled={!adjacent?.prev}
+          >
+            <ChevronLeftIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+
+      {adjacent && (
+        <Typography variant="caption" color="text.secondary" sx={{ minWidth: 52, textAlign: "center" }}>
+          {adjacent.position}/{adjacent.total}
+        </Typography>
+      )}
+
+      <Tooltip title="Next problem">
+        <span>
+          <IconButton
+            component={NextLink}
+            href={adjacent?.next ? `/app/problems/${adjacent.next}` : "#"}
+            aria-label="Next problem"
+            size="small"
+            disabled={!adjacent?.next}
+          >
+            <ChevronRightIcon fontSize="small" />
+          </IconButton>
+        </span>
+      </Tooltip>
+
+      {/* Problem title */}
+      <Typography
+        variant="body2"
+        fontWeight={600}
+        noWrap
+        sx={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", mx: 1 }}
+      >
+        {problem?.title ?? "Loading…"}
+      </Typography>
+
+      {/* Timer */}
+      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mr: 0.5 }}>
+        <TimerOutlinedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+        <Typography variant="caption" fontFamily="monospace" color="text.secondary">
+          {formatTimer(timerSecs)}
+        </Typography>
+      </Stack>
+
+      {/* Run */}
+      <Button
+        variant="outlined"
+        size="small"
+        startIcon={running ? <CircularProgress size={14} /> : <PlayArrowOutlinedIcon />}
+        onClick={onRun}
+        disabled={submitting || running}
+        sx={{ minWidth: 70 }}
+      >
+        Run
+      </Button>
+
+      {/* Submit */}
+      <Button
+        variant="contained"
+        size="small"
+        startIcon={submitting ? <CircularProgress size={14} sx={{ color: "inherit" }} /> : <UploadOutlinedIcon />}
+        onClick={onSubmit}
+        disabled={submitting || running}
+        sx={{ minWidth: 88 }}
+      >
+        {submitting ? "Judging…" : "Submit"}
+      </Button>
+
+      <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+
+      {/* User avatar */}
+      <IconButton
+        size="small"
+        aria-label="Account menu"
+        onClick={(e) => setAnchorEl(e.currentTarget)}
+      >
+        <Avatar sx={{ width: 28, height: 28, bgcolor: "primary.main", color: "primary.contrastText", fontSize: 12 }}>
+          {initials(user?.name)}
+        </Avatar>
+      </IconButton>
+      <Menu
+        anchorEl={anchorEl}
+        open={Boolean(anchorEl)}
+        onClose={() => setAnchorEl(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+      >
+        <MenuItem component={NextLink} href="/app/profile" onClick={() => setAnchorEl(null)}>
+          <ListItemIcon><PersonOutlineIcon fontSize="small" /></ListItemIcon>
+          Profile
+        </MenuItem>
+        <MenuItem onClick={handleSignOut}>
+          <ListItemIcon><LogoutIcon fontSize="small" /></ListItemIcon>
+          Sign out
+        </MenuItem>
+      </Menu>
+    </Box>
+  );
+}
+
+// ── Submission history entry ──────────────────────────────────────────────────
+
+function historyLangName(langId: number): string {
+  return LANGUAGES.find((l) => l.id === langId)?.name ?? `Language ${langId}`;
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+type OutputTab = "testcases" | "custom";
+type PanelTab  = "description" | "submissions";
+
+export default function ProblemSolvingPage() {
+  const params  = useParams<{ id: string }>();
+  const problemId = params.id;
+  const theme   = useTheme();
+  const isDark  = theme.palette.mode === "dark";
+  const isMobile = useMediaQuery(theme.breakpoints.down("lg"));
+
+  // ── Data state ──
+  const [problem,   setProblem]   = React.useState<ProblemDetail | null>(null);
+  const [adjacent,  setAdjacent]  = React.useState<AdjacentProblems | null>(null);
+  const [loading,   setLoading]   = React.useState(true);
+  const [error,     setError]     = React.useState(false);
+
+  // ── Editor state ──
+  const [langId, setLangId] = React.useState<LangId>(() => {
+    const saved = typeof window !== "undefined" ? localStorage.getItem(LS_LANG) : null;
+    return (saved ? Number(saved) : 71) as LangId;
+  });
+  const [code, setCode] = React.useState<string>("");
+  const [fontSize, setFontSize] = React.useState(14);
+  const editorRef = React.useRef<import("@monaco-editor/react").Editor | null>(null);
+
+  // ── Submission state ──
+  const [submitting,  setSubmitting]  = React.useState(false);
+  const [running,     setRunning]     = React.useState(false);
+  const [verdict,     setVerdict]     = React.useState<VerdictPayload | null>(null);
+  const [outputOpen,  setOutputOpen]  = React.useState(false);
+  const [outputTab,   setOutputTab]   = React.useState<OutputTab>("testcases");
+  const [customInput, setCustomInput] = React.useState("");
+
+  // ── Panel / tab state ──
+  const [panelTab, setPanelTab] = React.useState<PanelTab>("description");
+  const [history, setHistory]   = React.useState<ProblemHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = React.useState(false);
+
+  // ── Timer ──
+  const [timerSecs, setTimerSecs] = React.useState(() => {
+    if (typeof window === "undefined") return 0;
+    return parseInt(localStorage.getItem(lsTimer(problemId)) ?? "0", 10);
+  });
+  const timerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  React.useEffect(() => {
+    timerRef.current = setInterval(() => {
+      setTimerSecs((s) => {
+        const next = s + 1;
+        if (next % 30 === 0) localStorage.setItem(lsTimer(problemId), String(next));
+        return next;
+      });
+    }, 1000);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [problemId]);
+
+  // ── Load problem + adjacent ──
+  React.useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError(false);
+    Promise.allSettled([
+      api.get<{ success: boolean; data: ProblemDetail }>(`/api/problems/${problemId}`),
+      api.get<{ success: boolean; data: AdjacentProblems }>(`/api/problems/${problemId}/adjacent`),
+    ]).then(([probRes, adjRes]) => {
+      if (!active) return;
+      if (probRes.status === "rejected") { setError(true); setLoading(false); return; }
+      const prob = probRes.value.data.data;
+      setProblem(prob);
+      if (adjRes.status === "fulfilled") setAdjacent(adjRes.value.data.data);
+
+      // Load saved code or stub
+      const saved = localStorage.getItem(lsCode(problemId, langId));
+      setCode(saved ?? prob.stubs?.[String(langId)] ?? "");
+      setLoading(false);
+    });
+    return () => { active = false; };
+  }, [problemId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Language switch ──
+  React.useEffect(() => {
+    if (!problem) return;
+    const saved = localStorage.getItem(lsCode(problemId, langId));
+    setCode(saved ?? problem.stubs?.[String(langId)] ?? "");
+    localStorage.setItem(LS_LANG, String(langId));
+  }, [langId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Code autosave (on change) ──
+  const handleCodeChange = React.useCallback((val: string | undefined) => {
+    const v = val ?? "";
+    setCode(v);
+    localStorage.setItem(lsCode(problemId, langId), v);
+  }, [problemId, langId]);
+
+  // ── Load submission history (lazy) ──
+  const loadHistory = React.useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await api.get<{ success: boolean; data: ProblemHistoryEntry[] }>(
+        `/api/submit/history/${problemId}`
+      );
+      setHistory(res.data.data ?? []);
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [problemId]);
+
+  const handlePanelTab = (_: React.SyntheticEvent, val: PanelTab) => {
+    setPanelTab(val);
+    if (val === "submissions" && history.length === 0 && !historyLoading) {
+      loadHistory();
+    }
+  };
+
+  // ── Socket.io verdict handler ──
+  const handleVerdict = React.useCallback((payload: VerdictPayload) => {
+    setVerdict(payload);
+    setSubmitting(false);
+    setRunning(false);
+    setOutputOpen(true);
+    setOutputTab("testcases");
+    // Refresh history if on submissions tab
+    if (panelTab === "submissions") loadHistory();
+  }, [panelTab, loadHistory]);
+
+  // ── Execute (run or submit) ──
+  const execute = React.useCallback(
+    async (isSubmit: boolean) => {
+      if (!problem) return;
+      const currentCode = code;
+      if (!currentCode.trim()) return;
+
+      isSubmit ? setSubmitting(true) : setRunning(true);
+      setVerdict(null);
+
+      try {
+        const body: Record<string, unknown> = {
+          source_code: currentCode,
+          language_id: langId,
+          problem_id: problem.id,
+        };
+        if (!isSubmit) body.custom_input = customInput;
+
+        const res = await api.post<{ success: boolean; jobId?: string; error?: string }>("/api/submit", body);
+        if (!res.data.success || !res.data.jobId) {
+          setVerdict({ success: false, state: "failed", error: res.data.error ?? "Submission failed" });
+          setOutputOpen(true);
+          setSubmitting(false);
+          setRunning(false);
+          return;
+        }
+
+        const socket = createSocket();
+        joinRoom(socket, res.data.jobId);
+        socket.once("verdict", (payload: VerdictPayload) => {
+          handleVerdict(payload);
+          leaveRoom(socket, res.data.jobId!);
+          socket.disconnect();
+        });
+        // Safety timeout (60 s)
+        setTimeout(() => {
+          if (submitting || running) {
+            setVerdict({ success: false, state: "failed", error: "Judging timed out. Please try again." });
+            setSubmitting(false);
+            setRunning(false);
+            setOutputOpen(true);
+            socket.disconnect();
+          }
+        }, 60_000);
+      } catch {
+        setVerdict({ success: false, state: "failed", error: "Network error. Please check your connection." });
+        setSubmitting(false);
+        setRunning(false);
+        setOutputOpen(true);
+      }
+    },
+    [problem, code, langId, customInput, handleVerdict, submitting, running]
+  );
+
+  // ── Keyboard shortcuts ──
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        if (e.shiftKey) execute(true);
+        else execute(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [execute]);
+
+  // ── Reset code ──
+  const resetCode = () => {
+    const stub = problem?.stubs?.[String(langId)] ?? "";
+    setCode(stub);
+    localStorage.removeItem(lsCode(problemId, langId));
+  };
+
+  const lang = LANGUAGES.find((l) => l.id === langId) ?? LANGUAGES[0];
+  const verdictResult = verdict?.result;
+  const verdictDesc = verdictResult?.verdict?.description ?? (verdict?.error ? "Error" : null);
+  const { bg: vBg, fg: vFg } = verdictDesc ? verdictBg(verdictDesc) : { bg: "", fg: "" };
+
+  // ── Loading state ──
+  if (loading) {
+    return (
+      <Box sx={{ height: "100dvh", display: "flex", flexDirection: "column", bgcolor: "background.default" }}>
+        {/* Header skeleton */}
+        <Box sx={{ height: 52, borderBottom: "1px solid", borderColor: "outlineVariant", px: 2, display: "flex", alignItems: "center", gap: 2 }}>
+          <Skeleton width={100} />
+          <Box sx={{ flex: 1 }} />
+          <Skeleton width={60} height={36} />
+          <Skeleton width={80} height={36} />
+        </Box>
+        <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", lg: "45fr 55fr" }, flex: 1, overflow: "hidden" }}>
+          {/* Left skeleton */}
+          <Box sx={{ p: 3, overflow: "auto" }}>
+            <Skeleton width="60%" height={32} sx={{ mb: 1 }} />
+            <Skeleton width={80} sx={{ mb: 2 }} />
+            {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} sx={{ mb: 0.75 }} />)}
+          </Box>
+          {/* Right skeleton */}
+          <Box sx={{ borderLeft: "1px solid", borderColor: "outlineVariant", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <CircularProgress />
+          </Box>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (error || !problem) {
+    return (
+      <Box sx={{ height: "100dvh", display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "background.default" }}>
+        <ErrorState
+          title="Problem not found"
+          description="This problem may have been removed or you don't have access."
+          onRetry={() => { setError(false); setLoading(true); window.location.reload(); }}
+        />
+      </Box>
+    );
+  }
+
+  const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  // ── Render ──
+  return (
+    <Box
+      sx={{
+        height: "100dvh",
+        display: "flex",
+        flexDirection: "column",
+        bgcolor: "background.default",
+        overflow: "hidden",
+      }}
+    >
+      {/* ── Header ── */}
+      <IDEHeader
+        problem={problem}
+        adjacent={adjacent}
+        submitting={submitting}
+        running={running}
+        timerSecs={timerSecs}
+        onRun={() => { setOutputTab("custom"); setOutputOpen(true); execute(false); }}
+        onSubmit={() => execute(true)}
+      />
+
+      {/* ── Split pane ── */}
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", lg: "45fr 55fr" },
+          gridTemplateRows: { xs: "1fr 1fr", lg: "1fr" },
+          flex: 1,
+          overflow: "hidden",
+        }}
+      >
+        {/* ── Left panel: description / submissions ── */}
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            borderRight: { lg: "1px solid" },
+            borderColor: { lg: "outlineVariant" },
+            borderBottom: { xs: "1px solid", lg: "none" },
+            overflow: "hidden",
+          }}
+        >
+          {/* Tabs */}
+          <Box sx={{ borderBottom: "1px solid", borderColor: "outlineVariant", px: 1 }}>
+            <Tabs
+              value={panelTab}
+              onChange={handlePanelTab}
+              sx={{ minHeight: 42, "& .MuiTab-root": { minHeight: 42, py: 1, fontSize: "0.8rem" } }}
+            >
+              <Tab label="Description" value="description" />
+              <Tab label="Submissions" value="submissions" />
+            </Tabs>
+          </Box>
+
+          {/* Content */}
+          <Box sx={{ flex: 1, overflow: "auto", p: { xs: 2, sm: 2.5 } }}>
+            {panelTab === "description" && (
+              <Box>
+                {/* Title + metadata */}
+                <Typography variant="h5" fontWeight={600} gutterBottom>
+                  {problem.title}
+                </Typography>
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2, flexWrap: "wrap", gap: 1 }}>
+                  <DifficultyChip difficulty={cap(problem.difficulty)} />
+                  {problem.tags.map((tag) => (
+                    <Chip key={tag} label={tag} size="small" variant="outlined" sx={{ borderColor: "outlineVariant" }} />
+                  ))}
+                </Stack>
+
+                {/* Limits */}
+                <Stack direction="row" spacing={3} sx={{ mb: 2.5 }}>
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">Time limit</Typography>
+                    <Typography variant="body2" fontWeight={500}>{problem.time_limit} ms</Typography>
+                  </Box>
+                  <Box>
+                    <Typography variant="caption" color="text.secondary">Memory limit</Typography>
+                    <Typography variant="body2" fontWeight={500}>{problem.memory_limit} MB</Typography>
+                  </Box>
+                </Stack>
+
+                {/* Problem description */}
+                <ProblemMarkdown content={problem.description} />
+
+                {/* Examples */}
+                {problem.examples.length > 0 && (
+                  <Box sx={{ mt: 3 }}>
+                    <Typography variant="subtitle2" sx={{ mb: 1.5, fontWeight: 600 }}>
+                      Examples
+                    </Typography>
+                    <Stack spacing={2}>
+                      {problem.examples.map((ex, i) => (
+                        <Box
+                          key={i}
+                          sx={{
+                            bgcolor: "surfaceContainerLow",
+                            borderRadius: 2,
+                            p: 2,
+                            border: "1px solid",
+                            borderColor: "outlineVariant",
+                          }}
+                        >
+                          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+                            Example {i + 1}
+                          </Typography>
+                          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1 }}>
+                            <Box>
+                              <Typography variant="caption" color="text.secondary">Input</Typography>
+                              <Box component="pre" sx={{ m: 0, mt: 0.5, p: 1, bgcolor: "surfaceContainerHighest", borderRadius: 1, fontFamily: "monospace", fontSize: "0.8rem", overflow: "auto" }}>
+                                {ex.input}
+                              </Box>
+                            </Box>
+                            <Box>
+                              <Typography variant="caption" color="text.secondary">Output</Typography>
+                              <Box component="pre" sx={{ m: 0, mt: 0.5, p: 1, bgcolor: "surfaceContainerHighest", borderRadius: 1, fontFamily: "monospace", fontSize: "0.8rem", overflow: "auto" }}>
+                                {ex.output}
+                              </Box>
+                            </Box>
+                          </Box>
+                          {ex.explanation && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+                              {ex.explanation}
+                            </Typography>
+                          )}
+                        </Box>
+                      ))}
+                    </Stack>
+                  </Box>
+                )}
+              </Box>
+            )}
+
+            {panelTab === "submissions" && (
+              <Box>
+                {historyLoading ? (
+                  <Stack spacing={1.5}>
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <Skeleton key={i} height={56} sx={{ borderRadius: 2 }} />
+                    ))}
+                  </Stack>
+                ) : history.length === 0 ? (
+                  <Box sx={{ py: 8, textAlign: "center" }}>
+                    <Typography color="text.secondary" variant="body2">
+                      No submissions yet for this problem.
+                    </Typography>
+                    <Button variant="outlined" size="small" onClick={() => setPanelTab("description")} sx={{ mt: 2 }}>
+                      Read the problem
+                    </Button>
+                  </Box>
+                ) : (
+                  <Stack spacing={1}>
+                    {history.map((h) => (
+                      <Box
+                        key={h.id}
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          px: 2,
+                          py: 1.25,
+                          bgcolor: "surfaceContainerLow",
+                          borderRadius: 2,
+                          border: "1px solid",
+                          borderColor: "outlineVariant",
+                        }}
+                      >
+                        <VerdictChip verdict={h.verdict} />
+                        <Typography variant="caption" color="text.secondary">
+                          {historyLangName(h.language)}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {h.runtime != null ? `${h.runtime} ms` : "—"}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {new Date(h.submitted_at).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Stack>
+                )}
+              </Box>
+            )}
+          </Box>
+        </Box>
+
+        {/* ── Right panel: editor + output ── */}
+        <Box sx={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          {/* Editor toolbar */}
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              px: 1.5,
+              height: 42,
+              borderBottom: "1px solid",
+              borderColor: "outlineVariant",
+              bgcolor: "surface",
+              flexShrink: 0,
+            }}
+          >
+            {/* Language select */}
+            <Select
+              value={langId}
+              onChange={(e) => setLangId(Number(e.target.value) as LangId)}
+              size="small"
+              variant="outlined"
+              sx={{ height: 28, "& .MuiSelect-select": { py: 0.5, fontSize: "0.8rem" }, minWidth: 130 }}
+              aria-label="Select language"
+            >
+              {LANGUAGES.map((l) => (
+                <MenuItem key={l.id} value={l.id} sx={{ fontSize: "0.85rem" }}>
+                  {l.name}
+                </MenuItem>
+              ))}
+            </Select>
+
+            {/* Font size */}
+            <Select
+              value={fontSize}
+              onChange={(e) => setFontSize(Number(e.target.value))}
+              size="small"
+              variant="outlined"
+              sx={{ height: 28, "& .MuiSelect-select": { py: 0.5, fontSize: "0.8rem" }, width: 72 }}
+              aria-label="Font size"
+            >
+              {[12, 14, 16, 18].map((s) => (
+                <MenuItem key={s} value={s} sx={{ fontSize: "0.85rem" }}>{s}px</MenuItem>
+              ))}
+            </Select>
+
+            <Box sx={{ flex: 1 }} />
+
+            {/* Reset */}
+            <Tooltip title="Reset to starter code">
+              <IconButton size="small" onClick={resetCode} aria-label="Reset code to starter">
+                <RestartAltOutlinedIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+
+          {/* Monaco editor */}
+          <Box sx={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
+            <MonacoEditor
+              height="100%"
+              language={lang.monaco}
+              value={code}
+              onChange={handleCodeChange}
+              theme={isDark ? "vs-dark" : "light"}
+              options={{
+                fontSize,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                padding: { top: 12, bottom: 12 },
+                lineNumbersMinChars: 3,
+                folding: false,
+                wordWrap: "on",
+                automaticLayout: true,
+                tabSize: lang.monaco === "python" ? 4 : 2,
+              }}
+              onMount={(editor) => { editorRef.current = editor; }}
+            />
+          </Box>
+
+          {/* ── Output panel ── */}
+          <Box
+            sx={{
+              flexShrink: 0,
+              borderTop: "1px solid",
+              borderColor: "outlineVariant",
+              bgcolor: "surface",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* Output toolbar */}
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                px: 1.5,
+                height: 40,
+                gap: 1,
+              }}
+            >
+              <Tabs
+                value={outputTab}
+                onChange={(_, v) => setOutputTab(v as OutputTab)}
+                sx={{ flex: 1, minHeight: 40, "& .MuiTab-root": { minHeight: 40, py: 0, fontSize: "0.75rem" } }}
+              >
+                <Tab label="Test Results" value="testcases" />
+                <Tab label="Custom Input" value="custom" />
+              </Tabs>
+              <IconButton
+                size="small"
+                onClick={() => setOutputOpen((v) => !v)}
+                aria-label={outputOpen ? "Collapse output" : "Expand output"}
+              >
+                {outputOpen ? <ExpandMoreIcon fontSize="small" /> : <ExpandLessIcon fontSize="small" />}
+              </IconButton>
+            </Box>
+
+            {/* Verdict banner */}
+            {verdict && verdictDesc && (
+              <Box sx={{ px: 1.5, pb: outputOpen ? 0 : 1 }}>
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    px: 2,
+                    py: 0.75,
+                    borderRadius: 2,
+                    bgcolor: vBg,
+                    color: vFg,
+                  }}
+                >
+                  <Typography variant="subtitle2" fontWeight={700}>
+                    {verdictDesc}
+                    {verdictResult && ` — ${verdictResult.passed_count}/${verdictResult.total_count} passed`}
+                  </Typography>
+                  {verdictResult && (
+                    <Stack direction="row" spacing={2}>
+                      <Typography variant="caption">{formatMs(verdictResult.time)}</Typography>
+                      <Typography variant="caption">{formatKb(verdictResult.memory)}</Typography>
+                    </Stack>
+                  )}
+                </Box>
+              </Box>
+            )}
+            {verdict && !verdict.success && verdict.error && (
+              <Box sx={{ px: 1.5, pb: outputOpen ? 0 : 1 }}>
+                <Box sx={{ px: 2, py: 0.75, borderRadius: 2, bgcolor: "errorContainer", color: "onErrorContainer" }}>
+                  <Typography variant="caption">{verdict.error}</Typography>
+                </Box>
+              </Box>
+            )}
+
+            {/* Output content */}
+            <Collapse in={outputOpen}>
+              <Box sx={{ maxHeight: 260, overflow: "auto", px: 1.5, pb: 1.5, pt: 1 }}>
+                {outputTab === "testcases" && (
+                  <Box>
+                    {(submitting || running) && (
+                      <Stack alignItems="center" justifyContent="center" sx={{ py: 4 }} spacing={1}>
+                        <CircularProgress size={24} />
+                        <Typography variant="caption" color="text.secondary">Judging…</Typography>
+                      </Stack>
+                    )}
+                    {!submitting && !running && verdictResult && (
+                      <Stack spacing={1}>
+                        {verdictResult.test_case_results.map((r, i) => (
+                          <TestCaseRow key={i} index={i} result={r} />
+                        ))}
+                      </Stack>
+                    )}
+                    {!submitting && !running && !verdictResult && !verdict && (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", textAlign: "center", py: 3 }}>
+                        Submit your code to see test results here.
+                        <br />
+                        <Typography component="span" variant="caption" color="text.disabled">
+                          Ctrl + Shift + Enter to submit · Ctrl + Enter to run
+                        </Typography>
+                      </Typography>
+                    )}
+                  </Box>
+                )}
+                {outputTab === "custom" && (
+                  <Stack spacing={1.5}>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+                        Standard input (stdin)
+                      </Typography>
+                      <Box
+                        component="textarea"
+                        value={customInput}
+                        onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCustomInput(e.target.value)}
+                        placeholder="Enter custom input here…"
+                        rows={4}
+                        sx={{
+                          width: "100%",
+                          resize: "vertical",
+                          fontFamily: "monospace",
+                          fontSize: "0.85rem",
+                          p: 1,
+                          bgcolor: "surfaceContainerHigh",
+                          color: "text.primary",
+                          border: "1px solid",
+                          borderColor: "outlineVariant",
+                          borderRadius: 1.5,
+                          outline: "none",
+                          "&:focus": { borderColor: "primary.main" },
+                          boxSizing: "border-box",
+                        }}
+                      />
+                    </Box>
+                    {verdictResult?.custom_run && verdictResult.test_case_results[0] && (
+                      <Box>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+                          Output
+                        </Typography>
+                        <Box
+                          component="pre"
+                          sx={{
+                            m: 0,
+                            p: 1,
+                            bgcolor: "surfaceContainerHighest",
+                            borderRadius: 1.5,
+                            fontFamily: "monospace",
+                            fontSize: "0.8rem",
+                            maxHeight: 100,
+                            overflow: "auto",
+                            whiteSpace: "pre-wrap",
+                          }}
+                        >
+                          {verdictResult.test_case_results[0].stdout || "(no output)"}
+                        </Box>
+                        {verdictResult.test_case_results[0].stderr && (
+                          <Box component="pre" sx={{ m: 0, mt: 0.75, p: 1, bgcolor: "errorContainer", color: "onErrorContainer", borderRadius: 1.5, fontFamily: "monospace", fontSize: "0.8rem", maxHeight: 80, overflow: "auto" }}>
+                            {verdictResult.test_case_results[0].stderr}
+                          </Box>
+                        )}
+                      </Box>
+                    )}
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={running ? <CircularProgress size={14} /> : <PlayArrowOutlinedIcon />}
+                      onClick={() => execute(false)}
+                      disabled={running || submitting}
+                      sx={{ alignSelf: "flex-start" }}
+                    >
+                      {running ? "Running…" : "Run with custom input"}
+                    </Button>
+                  </Stack>
+                )}
+              </Box>
+            </Collapse>
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+  );
+}

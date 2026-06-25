@@ -1,0 +1,28 @@
+/* Minimal reset; MUI CssBaseline + theme handle colors, fonts, and scheme. */
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+  padding: 0;
+  margin: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Skip-to-content link — visible only when focused (keyboard users). */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: -56px;
+  z-index: 2000;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--mui-palette-primary-main);
+  color: var(--mui-palette-primary-contrastText);
+  transition: top 0.15s ease;
+}
+.skip-link:focus-visible {
+  top: 8px;
+}
