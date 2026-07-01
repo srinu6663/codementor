@@ -23,6 +23,7 @@ import CircularProgress from "@mui/material/CircularProgress";
 import Collapse from "@mui/material/Collapse";
 import Avatar from "@mui/material/Avatar";
 import Menu from "@mui/material/Menu";
+import Drawer from "@mui/material/Drawer";
 import ListItemIcon from "@mui/material/ListItemIcon";
 import { useTheme } from "@mui/material/styles";
 import useMediaQuery from "@mui/material/useMediaQuery";
@@ -39,12 +40,14 @@ import CancelOutlinedIcon from "@mui/icons-material/CancelOutlined";
 import TimerOutlinedIcon from "@mui/icons-material/TimerOutlined";
 import LogoutIcon from "@mui/icons-material/Logout";
 import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
+import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import api from "@/lib/api";
 import { createSocket, joinRoom, leaveRoom } from "@/lib/socket";
 import { clearSession, getUser } from "@/lib/auth";
 import { DifficultyChip } from "@/components/ui/DifficultyChip";
 import { VerdictChip } from "@/components/ui/VerdictChip";
 import { ErrorState } from "@/components/ui/States";
+import { AITutorSidebar, type FailingTest } from "@/components/problem/AITutorSidebar";
 import type {
   ProblemDetail,
   AdjacentProblems,
@@ -54,6 +57,10 @@ import type {
 } from "@/lib/types";
 
 // ── Monaco editor (client-only) ───────────────────────────────────────────────
+
+type MonacoEditorInstance = Parameters<
+  import("@monaco-editor/react").OnMount
+>[0];
 
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
@@ -272,6 +279,8 @@ function IDEHeader({
   timerSecs,
   onRun,
   onSubmit,
+  showAI,
+  onToggleAI,
 }: {
   problem: ProblemDetail | null;
   adjacent: AdjacentProblems | null;
@@ -281,6 +290,8 @@ function IDEHeader({
   timerSecs: number;
   onRun: () => void;
   onSubmit: () => void;
+  showAI: boolean;
+  onToggleAI: () => void;
 }) {
   const router = useRouter();
   const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
@@ -392,6 +403,22 @@ function IDEHeader({
 
       <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
 
+      {/* AI Tutor toggle */}
+      <Tooltip title={showAI ? "Hide AI Tutor" : "Ask the AI Tutor"}>
+        <IconButton
+          size="small"
+          onClick={onToggleAI}
+          aria-label="Toggle AI Tutor"
+          aria-pressed={showAI}
+          sx={{
+            color: showAI ? "#7C5CFF" : "text.secondary",
+            bgcolor: showAI ? "color-mix(in srgb, #7C5CFF 14%, transparent)" : "transparent",
+          }}
+        >
+          <SmartToyOutlinedIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+
       {/* User avatar */}
       <IconButton
         size="small"
@@ -453,7 +480,7 @@ export default function ProblemSolvingPage() {
   });
   const [code, setCode] = React.useState<string>("");
   const [fontSize, setFontSize] = React.useState(14);
-  const editorRef = React.useRef<import("@monaco-editor/react").Editor | null>(null);
+  const editorRef = React.useRef<MonacoEditorInstance | null>(null);
 
   // ── Submission state ──
   const [submitting,  setSubmitting]  = React.useState(false);
@@ -467,6 +494,10 @@ export default function ProblemSolvingPage() {
   const [panelTab, setPanelTab] = React.useState<PanelTab>("description");
   const [history, setHistory]   = React.useState<ProblemHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = React.useState(false);
+
+  // ── AI Tutor ──
+  const [showAI, setShowAI] = React.useState(false);
+  const [tutorContext, setTutorContext] = React.useState<string | undefined>(undefined);
 
   // ── Timer ──
   const [timerSecs, setTimerSecs] = React.useState(() => {
@@ -557,6 +588,11 @@ export default function ProblemSolvingPage() {
     setOutputTab("testcases");
     // Refresh history if on submissions tab
     if (panelTab === "submissions") loadHistory();
+    // Nudge the AI tutor toward debugging when a real submission fails.
+    const r = payload.result;
+    if (r && !r.custom_run && r.verdict?.description && r.verdict.description !== "Accepted") {
+      setTutorContext(`${r.submission_id}:${r.verdict.id}`);
+    }
   }, [panelTab, loadHistory]);
 
   // ── Execute (run or submit) ──
@@ -638,6 +674,19 @@ export default function ProblemSolvingPage() {
   const verdictDesc = verdictResult?.verdict?.description ?? (verdict?.error ? "Error" : null);
   const { bg: vBg, fg: vFg } = verdictDesc ? verdictBg(verdictDesc) : { bg: "", fg: "" };
 
+  // First failing test case → context for the AI tutor (hidden cases withhold I/O).
+  const failingTest: FailingTest | null = React.useMemo(() => {
+    if (!verdictResult || verdictResult.custom_run) return null;
+    const fail = verdictResult.test_case_results.find((r) => !r.passed);
+    if (!fail) return null;
+    return {
+      input: fail.input,
+      expected: fail.expected,
+      output: fail.stdout ?? "",
+      hidden: !fail.is_public,
+    };
+  }, [verdictResult]);
+
   // ── Loading state ──
   if (loading) {
     return (
@@ -699,15 +748,19 @@ export default function ProblemSolvingPage() {
         timerSecs={timerSecs}
         onRun={() => { setOutputTab("custom"); setOutputOpen(true); execute(false); }}
         onSubmit={() => execute(true)}
+        showAI={showAI}
+        onToggleAI={() => setShowAI((v) => !v)}
       />
 
-      {/* ── Split pane ── */}
+      {/* ── Workspace: split pane + optional AI Tutor sidebar ── */}
+      <Box sx={{ flex: 1, display: "flex", minHeight: 0, overflow: "hidden" }}>
       <Box
         sx={{
           display: "grid",
           gridTemplateColumns: { xs: "1fr", lg: "45fr 55fr" },
           gridTemplateRows: { xs: "1fr 1fr", lg: "1fr" },
           flex: 1,
+          minWidth: 0,
           overflow: "hidden",
         }}
       >
@@ -1120,7 +1173,46 @@ export default function ProblemSolvingPage() {
             </Collapse>
           </Box>
         </Box>
+
       </Box>
+
+      {/* AI Tutor — inline column on desktop */}
+      {showAI && !isMobile && (
+        <Box sx={{ width: 340, flexShrink: 0, borderLeft: "1px solid", borderColor: "outlineVariant" }}>
+          <AITutorSidebar
+            onClose={() => setShowAI(false)}
+            contextNote={tutorContext}
+            problemTitle={problem.title}
+            problemId={problem.id}
+            code={code}
+            language={lang.name}
+            problemDescription={problem.description}
+            failingTest={failingTest}
+          />
+        </Box>
+      )}
+      </Box>
+
+      {/* AI Tutor — drawer on smaller screens */}
+      {isMobile && (
+        <Drawer
+          anchor="right"
+          open={showAI}
+          onClose={() => setShowAI(false)}
+          slotProps={{ paper: { sx: { width: { xs: "100%", sm: 360 }, maxWidth: "100%" } } }}
+        >
+          <AITutorSidebar
+            onClose={() => setShowAI(false)}
+            contextNote={tutorContext}
+            problemTitle={problem.title}
+            problemId={problem.id}
+            code={code}
+            language={lang.name}
+            problemDescription={problem.description}
+            failingTest={failingTest}
+          />
+        </Drawer>
+      )}
     </Box>
   );
 }
