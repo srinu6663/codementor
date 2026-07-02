@@ -41,8 +41,12 @@ import TimerOutlinedIcon from "@mui/icons-material/TimerOutlined";
 import LogoutIcon from "@mui/icons-material/Logout";
 import PersonOutlineIcon from "@mui/icons-material/PersonOutline";
 import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
+import Alert from "@mui/material/Alert";
+import ShieldOutlinedIcon from "@mui/icons-material/ShieldOutlined";
+import FullscreenIcon from "@mui/icons-material/Fullscreen";
 import api from "@/lib/api";
 import { createSocket, joinRoom, leaveRoom } from "@/lib/socket";
+import { useProctor } from "@/hooks/useProctor";
 import { clearSession, getUser } from "@/lib/auth";
 import { DifficultyChip } from "@/components/ui/DifficultyChip";
 import { VerdictChip } from "@/components/ui/VerdictChip";
@@ -467,6 +471,21 @@ export default function ProblemSolvingPage() {
   const isDark  = theme.palette.mode === "dark";
   const isMobile = useMediaQuery(theme.breakpoints.down("lg"));
 
+  // ── Assignment / contest / proctor context (from the query string) ──
+  // Read once from window.location so we avoid a Suspense boundary for useSearchParams.
+  const [searchParams] = React.useState(() =>
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams(),
+  );
+  const assignmentId = searchParams.get("assignment");
+  const contestId = searchParams.get("contest");
+  const proctored = !!assignmentId && searchParams.get("proctor") === "1";
+
+  // ── Judging lifecycle refs (avoid stale closures / socket leaks) ──
+  const socketRef = React.useRef<ReturnType<typeof createSocket> | null>(null);
+  const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingRef = React.useRef(false);
+  const autoSubmitRef = React.useRef<() => void>(() => {});
+
   // ── Data state ──
   const [problem,   setProblem]   = React.useState<ProblemDetail | null>(null);
   const [adjacent,  setAdjacent]  = React.useState<AdjacentProblems | null>(null);
@@ -581,6 +600,8 @@ export default function ProblemSolvingPage() {
 
   // ── Socket.io verdict handler ──
   const handleVerdict = React.useCallback((payload: VerdictPayload) => {
+    pendingRef.current = false;
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
     setVerdict(payload);
     setSubmitting(false);
     setRunning(false);
@@ -602,8 +623,20 @@ export default function ProblemSolvingPage() {
       const currentCode = code;
       if (!currentCode.trim()) return;
 
-      isSubmit ? setSubmitting(true) : setRunning(true);
+      // Tear down any in-flight judging before starting a new one.
+      if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+      if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+      pendingRef.current = true;
+
+      if (isSubmit) setSubmitting(true);
+      else setRunning(true);
       setVerdict(null);
+
+      const settle = () => {
+        pendingRef.current = false;
+        if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+        if (socketRef.current) { socketRef.current.disconnect(); socketRef.current = null; }
+      };
 
       try {
         const body: Record<string, unknown> = {
@@ -612,6 +645,9 @@ export default function ProblemSolvingPage() {
           problem_id: problem.id,
         };
         if (!isSubmit) body.custom_input = customInput;
+        // Attach assignment / contest context so the submission is recorded against them.
+        if (assignmentId) body.assignment_id = assignmentId;
+        if (contestId) body.contest_id = contestId;
 
         const res = await api.post<{ success: boolean; jobId?: string; error?: string }>("/api/submit", body);
         if (!res.data.success || !res.data.jobId) {
@@ -619,34 +655,37 @@ export default function ProblemSolvingPage() {
           setOutputOpen(true);
           setSubmitting(false);
           setRunning(false);
+          settle();
           return;
         }
 
         const socket = createSocket();
-        joinRoom(socket, res.data.jobId);
+        socketRef.current = socket;
+        const jobId = res.data.jobId;
+        joinRoom(socket, jobId);
         socket.once("verdict", (payload: VerdictPayload) => {
+          leaveRoom(socket, jobId);
+          settle();
           handleVerdict(payload);
-          leaveRoom(socket, res.data.jobId!);
-          socket.disconnect();
         });
-        // Safety timeout (60 s)
-        setTimeout(() => {
-          if (submitting || running) {
-            setVerdict({ success: false, state: "failed", error: "Judging timed out. Please try again." });
-            setSubmitting(false);
-            setRunning(false);
-            setOutputOpen(true);
-            socket.disconnect();
-          }
+        // Safety timeout (60 s) — fires only if the verdict never arrives.
+        timeoutRef.current = setTimeout(() => {
+          if (!pendingRef.current) return;
+          settle();
+          setVerdict({ success: false, state: "failed", error: "Judging timed out. Please try again." });
+          setSubmitting(false);
+          setRunning(false);
+          setOutputOpen(true);
         }, 60_000);
       } catch {
         setVerdict({ success: false, state: "failed", error: "Network error. Please check your connection." });
         setSubmitting(false);
         setRunning(false);
         setOutputOpen(true);
+        settle();
       }
     },
-    [problem, code, langId, customInput, handleVerdict, submitting, running]
+    [problem, code, langId, customInput, assignmentId, contestId, handleVerdict]
   );
 
   // ── Keyboard shortcuts ──
@@ -661,6 +700,28 @@ export default function ProblemSolvingPage() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [execute]);
+
+  // Keep the auto-submit ref pointed at the latest submit for the proctor hook.
+  React.useEffect(() => {
+    autoSubmitRef.current = () => execute(true);
+  }, [execute]);
+
+  // Tear down any live socket / timeout when leaving the page.
+  React.useEffect(
+    () => () => {
+      if (socketRef.current) socketRef.current.disconnect();
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    },
+    [],
+  );
+
+  // ── Proctored-exam monitor (only when ?proctor=1 on an assignment) ──
+  const proctor = useProctor({
+    active: proctored,
+    assignmentId,
+    problemId,
+    onAutoSubmit: () => autoSubmitRef.current(),
+  });
 
   // ── Reset code ──
   const resetCode = () => {
@@ -739,6 +800,52 @@ export default function ProblemSolvingPage() {
         overflow: "hidden",
       }}
     >
+      {/* ── Proctored exam banner ── */}
+      {proctored && (
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            gap: 1.5,
+            px: 2,
+            py: 1,
+            bgcolor: "errorContainer",
+            color: "onErrorContainer",
+            borderBottom: "1px solid",
+            borderColor: "outlineVariant",
+            flexShrink: 0,
+          }}
+        >
+          <ShieldOutlinedIcon fontSize="small" />
+          <Typography variant="body2" fontWeight={600}>Proctored Exam</Typography>
+          <Typography variant="caption" sx={{ opacity: 0.9 }}>
+            {proctor.violations} flag{proctor.violations === 1 ? "" : "s"} recorded · stay in fullscreen, don&apos;t switch tabs
+          </Typography>
+          {!proctor.fullscreen && (
+            <Button
+              size="small"
+              variant="contained"
+              color="error"
+              startIcon={<FullscreenIcon />}
+              onClick={proctor.requestFullscreen}
+              sx={{ ml: "auto" }}
+            >
+              Enter fullscreen
+            </Button>
+          )}
+        </Box>
+      )}
+      {proctored && proctor.warning && (
+        <Alert
+          severity="warning"
+          icon={<ShieldOutlinedIcon fontSize="small" />}
+          onClose={proctor.dismissWarning}
+          sx={{ borderRadius: 0, flexShrink: 0 }}
+        >
+          {proctor.warning}
+        </Alert>
+      )}
+
       {/* ── Header ── */}
       <IDEHeader
         problem={problem}
