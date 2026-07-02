@@ -29,6 +29,7 @@ import WarningAmberOutlinedIcon from "@mui/icons-material/WarningAmberOutlined";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import api from "@/lib/api";
 import { getUser } from "@/lib/auth";
+import { languageName } from "@/lib/languages";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { StatCard } from "@/components/ui/StatCard";
 import { DifficultyChip } from "@/components/ui/DifficultyChip";
@@ -504,7 +505,7 @@ export default function DashboardPage() {
                         >
                           <ListItemText
                             primary={sub.problem_title}
-                            secondary={`${sub.language} · ${timeAgo(sub.created_at)}`}
+                            secondary={`${languageName(sub.language)} · ${timeAgo(sub.created_at)}`}
                             sx={{ minWidth: 0, mr: 1 }}
                             slotProps={{
                               primary: { variant: "body2", fontWeight: 500, noWrap: true },

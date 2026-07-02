@@ -66,6 +66,15 @@ type MonacoEditorInstance = Parameters<
   import("@monaco-editor/react").OnMount
 >[0];
 
+// Serve Monaco from our own origin (public/monaco/vs, copied from node_modules by
+// scripts/copy-monaco.mjs) instead of the default jsdelivr CDN — so the code editor
+// works offline and on locked-down networks (e.g. the college server).
+if (typeof window !== "undefined") {
+  import("@monaco-editor/react").then(({ loader }) => {
+    loader.config({ paths: { vs: "/monaco/vs" } });
+  });
+}
+
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
   ssr: false,
   loading: () => (

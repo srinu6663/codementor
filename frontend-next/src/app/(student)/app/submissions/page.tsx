@@ -5,7 +5,6 @@ import NextLink from "next/link";
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import Link from "@mui/material/Link";
-import Stack from "@mui/material/Stack";
 import Skeleton from "@mui/material/Skeleton";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
@@ -19,6 +18,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { SegmentedButtons } from "@/components/ui/SegmentedButtons";
 import { VerdictChip } from "@/components/ui/VerdictChip";
 import { EmptyState, ErrorState } from "@/components/ui/States";
+import { languageName } from "@/lib/languages";
 
 interface SubmissionRow {
   id: string;
@@ -94,11 +94,7 @@ export default function SubmissionsPage() {
         <SegmentedButtons<Filter>
           value={filter}
           onChange={setFilter}
-          segments={[
-            { value: "all", label: "All" },
-            { value: "accepted", label: "Accepted" },
-            { value: "failed", label: "Failed" },
-          ]}
+          segments={FILTERS.map((f) => ({ value: f, label: f.charAt(0).toUpperCase() + f.slice(1) }))}
           ariaLabel="Filter submissions by verdict"
         />
       </Box>
@@ -176,7 +172,7 @@ export default function SubmissionsPage() {
                         <VerdictChip verdict={s.verdict} />
                       </TableCell>
                       <TableCell sx={{ color: "text.secondary", fontFamily: "ui-monospace, monospace", fontSize: 13 }}>
-                        {s.language}
+                        {languageName(s.language)}
                       </TableCell>
                       <TableCell align="right" sx={{ color: "text.secondary", fontFamily: "ui-monospace, monospace", fontSize: 13 }}>
                         {s.runtime != null ? `${s.runtime} ms` : "—"}

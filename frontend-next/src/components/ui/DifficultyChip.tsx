@@ -31,7 +31,9 @@ const TONE_COLORS: Record<Tone, { bg: string; fg: string }> = {
  */
 export function DifficultyChip({ difficulty, size = "small" }: { difficulty: string; size?: "small" | "medium" }) {
   const { bg, fg } = TONE_COLORS[toneFor(difficulty)];
+  // Normalize casing so inconsistent DB values ("easy" vs "Easy") render uniformly.
+  const label = difficulty ? difficulty.charAt(0).toUpperCase() + difficulty.slice(1).toLowerCase() : "—";
   return (
-    <Chip label={difficulty || "—"} size={size} sx={{ bgcolor: bg, color: fg, fontWeight: 500 }} />
+    <Chip label={label} size={size} sx={{ bgcolor: bg, color: fg, fontWeight: 500 }} />
   );
 }

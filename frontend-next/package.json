@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "copy-monaco": "node scripts/copy-monaco.mjs",
+    "predev": "node scripts/copy-monaco.mjs",
+    "prebuild": "node scripts/copy-monaco.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
